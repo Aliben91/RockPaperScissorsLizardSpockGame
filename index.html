@@ -105,6 +105,7 @@
                                 <button id="copy-code" class="btn btn--secondary btn--sm">Copy</button>
                             </div>
                             <p class="help-text">Share this code with another player to join your game</p>
+                            <div id="room-status" class="status--info status">Waiting for player to join...</div>
                         </div>
 
                         <button id="start-game" class="btn btn--primary btn--full-width">Start Game</button>
@@ -150,6 +151,10 @@
                         <div class="game-progress">
                             <span id="game-progress-text">Round 1</span>
                         </div>
+                    </div>
+
+                    <div class="connection-status" id="connection-status">
+                        <span class="status--info status">Connected</span>
                     </div>
 
                     <div class="game-area">
@@ -343,7 +348,7 @@
                         </div>
                         <div id="leaderboard-body" class="table-body">
                             <div class="empty-state">
-                                <p>No games played yet. Start playing to see statistics!</p>
+                                <p>Loading leaderboard...</p>
                             </div>
                         </div>
                     </div>
@@ -352,6 +357,9 @@
         </main>
     </div>
 
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
