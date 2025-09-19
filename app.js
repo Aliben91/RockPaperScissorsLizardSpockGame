@@ -147,6 +147,11 @@ class FirebaseGameManager {
       };
 
       await this.database.ref(`rooms/${roomCode}`).set(roomData);
+
+      await this.database.ref(`rooms/${roomCode}/players_check/${playerId}`).set({
+        id: playerId,
+        name: gameConfig.hostName,
+      });
       
       // Setup presence for host
       const presenceRef = this.database.ref(`rooms/${roomCode}/players/${playerId}/connected`);
@@ -194,6 +199,11 @@ class FirebaseGameManager {
         choice: null,
         joinedAt: Date.now(),
         isHost: false
+      });
+
+      await this.database.ref(`rooms/${roomCode}/players_check/${playerId}`).set({
+        id: playerId,
+        name: playerName,
       });
 
       // Setup presence for guest
@@ -282,7 +292,7 @@ class FirebaseGameManager {
       gameState.roomListeners.push({ ref: roomRef, listener: roomListener });
 
       // Listen for player connections
-      const playersRef = this.database.ref(`rooms/${roomCode}/players`);
+      const playersRef = this.database.ref(`rooms/${roomCode}/players_check`);
       const playersListener = playersRef.on('value', (snapshot) => {
         const players = snapshot.val() || {};
         this.handlePlayersUpdate(players, playerId);
