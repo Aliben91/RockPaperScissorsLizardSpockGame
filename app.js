@@ -9,1440 +9,1710 @@ const firebaseConfig = {
   appId: "1:665715994571:web:52d971ca41f55e052f104e",
 };
 
-// Game Data
-const gameRules = {
-  rock: { beats: ['lizard', 'scissors'], actions: ['crushes', 'crushes'] },
-  paper: { beats: ['rock', 'spock'], actions: ['covers', 'disproves'] },
-  scissors: { beats: ['paper', 'lizard'], actions: ['cuts', 'decapitates'] },
-  lizard: { beats: ['spock', 'paper'], actions: ['poisons', 'eats'] },
-  spock: { beats: ['scissors', 'rock'], actions: ['smashes', 'vaporizes'] }
+// Game Rules
+const GAME_RULES = {
+  rock: { beats: ["lizard", "scissors"], actions: ["crushes", "crushes"] },
+  paper: { beats: ["rock", "spock"], actions: ["covers", "disproves"] },
+  scissors: { beats: ["paper", "lizard"], actions: ["cuts", "decapitates"] },
+  lizard: { beats: ["spock", "paper"], actions: ["poisons", "eats"] },
+  spock: { beats: ["scissors", "rock"], actions: ["smashes", "vaporizes"] },
 };
 
-const choices = [
-  { id: 'rock', name: 'Rock', emoji: '🗿' },
-  { id: 'paper', name: 'Paper', emoji: '📄' },
-  { id: 'scissors', name: 'Scissors', emoji: '✂️' },
-  { id: 'lizard', name: 'Lizard', emoji: '🦎' },
-  { id: 'spock', name: 'Spock', emoji: '🖖' }
+const CHOICES = [
+  { id: "rock", name: "Rock", emoji: "🗿" },
+  { id: "paper", name: "Paper", emoji: "📄" },
+  { id: "scissors", name: "Scissors", emoji: "✂️" },
+  { id: "lizard", name: "Lizard", emoji: "🦎" },
+  { id: "spock", name: "Spock", emoji: "🖖" },
 ];
 
-// Initialize Firebase
-let app, database;
-try {
-  app = firebase.initializeApp(firebaseConfig);
-  database = firebase.database();
-  console.log('Firebase initialized successfully');
-} catch (error) {
-  console.error('Firebase initialization failed:', error);
-}
-
-// Game State
-let gameState = {
-  currentSection: 'main-menu',
-  gameMode: 'local',
-  difficulty: 'medium',
-  maxGames: 3,
-  currentGame: 0,
-  player1: { name: 'Player 1', score: 0, choice: null, id: null },
-  player2: { name: 'Computer', score: 0, choice: null, id: null },
-  gameHistory: [],
-  playerHistory: [],
-  currentRoomCode: null,
-  isGameActive: false,
-  waitingForChoice: false,
-  leaderboard: [],
-  isHost: false,
-  connectionRef: null,
-  roomListeners: []
+// Game States - STRICT STATE MACHINE
+const GAME_STATES = {
+  MENU: "MENU",
+  LOCAL_SETUP: "LOCAL_SETUP",
+  CREATE_ROOM: "CREATE_ROOM",
+  JOIN_ROOM: "JOIN_ROOM",
+  WAITING_FOR_PLAYERS: "WAITING_FOR_PLAYERS",
+  GAME_READY: "GAME_READY",
+  ROUND_IN_PROGRESS: "ROUND_IN_PROGRESS",
+  ROUND_COMPLETE: "ROUND_COMPLETE",
+  SERIES_COMPLETE: "SERIES_COMPLETE",
 };
 
-// Firebase Game Manager - Real Implementation
-class FirebaseGameManager {
+// Global State
+let app = null;
+let database = null;
+let firebaseAvailable = false;
+let currentGameState = GAME_STATES.MENU;
+let gameData = null;
+let roomRef = null;
+let playerId = null;
+let gameListeners = [];
+
+// Debug and Logging System
+class GameLogger {
+  static logs = [];
+
+  static log(event, data = {}) {
+    const timestamp = new Date().toISOString();
+    const logEntry = { timestamp, event, data, state: currentGameState };
+
+    console.log(`[${timestamp}] ${event}:`, data);
+    this.logs.push(logEntry);
+
+    // Keep only last 100 logs
+    if (this.logs.length > 100) {
+      this.logs = this.logs.slice(-100);
+    }
+
+    // Update debug panel
+    this.updateDebugPanel();
+  }
+
+  static updateDebugPanel() {
+    const debugState = document.getElementById("debug-state");
+    const debugRoom = document.getElementById("debug-room");
+    const debugPlayers = document.getElementById("debug-players");
+    const debugRound = document.getElementById("debug-round");
+
+    if (debugState) debugState.textContent = currentGameState;
+    if (debugRoom) debugRoom.textContent = gameData?.roomCode || "None";
+    if (debugPlayers)
+      debugPlayers.textContent = gameData?.players
+        ? Object.keys(gameData.players).length
+        : "0";
+    if (debugRound)
+      debugRound.textContent = gameData
+        ? `${gameData.currentRound || 0}/${gameData.maxRounds || 0}`
+        : "0/0";
+  }
+
+  static getRecentLogs(count = 10) {
+    return this.logs.slice(-count);
+  }
+}
+
+// Connection Manager
+class ConnectionManager {
   constructor() {
-    this.database = database;
-    this.connectionRef = null;
-    this.presenceRef = null;
-    this.setupPresenceSystem();
+    this.isOnline = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
+    this.heartbeatInterval = null;
+  }
+
+  async initialize() {
+    GameLogger.log("CONNECTION_INIT", { config: "Checking Firebase config" });
+
+    try {
+      // Check if config has placeholder values
+      if (firebaseConfig.apiKey === "your-api-key-here") {
+        GameLogger.log("FIREBASE_CONFIG_MISSING", {
+          reason: "Placeholder values detected",
+        });
+        this.handleFirebaseUnavailable();
+        return false;
+      }
+
+      // Initialize Firebase
+      app = firebase.initializeApp(firebaseConfig);
+      database = firebase.database();
+
+      // Generate unique player ID
+      playerId = this.generatePlayerId();
+      GameLogger.log("PLAYER_ID_GENERATED", { playerId });
+
+      // Test connection
+      await this.testConnection();
+
+      firebaseAvailable = true;
+      this.isOnline = true;
+      this.setupConnectionMonitoring();
+      this.updateConnectionStatus("connected", "Firebase Connected");
+      this.enableOnlineFeatures();
+
+      GameLogger.log("FIREBASE_CONNECTED", { playerId });
+      return true;
+    } catch (error) {
+      GameLogger.log("FIREBASE_CONNECTION_FAILED", { error: error.message });
+      this.handleFirebaseUnavailable();
+      return false;
+    }
+  }
+
+  async testConnection() {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Connection timeout"));
+      }, 5000);
+
+      const connectedRef = database.ref("info/connected");
+      connectedRef.once(
+        "value",
+        (snapshot) => {
+          clearTimeout(timeout);
+          if (snapshot.val() === true) {
+            resolve();
+          } else {
+            reject(new Error("Not connected"));
+          }
+        },
+        (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  setupConnectionMonitoring() {
+    const connectedRef = database.ref("info/connected");
+    connectedRef.on("value", (snapshot) => {
+      if (snapshot.val() === true) {
+        this.isOnline = true;
+        this.reconnectAttempts = 0;
+        this.updateConnectionStatus("connected", "Firebase Connected");
+        GameLogger.log("CONNECTION_RESTORED");
+      } else {
+        this.isOnline = false;
+        this.updateConnectionStatus(
+          "connecting",
+          "Reconnecting to Firebase..."
+        );
+        GameLogger.log("CONNECTION_LOST");
+        this.handleReconnect();
+      }
+    });
+  }
+
+  handleReconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      GameLogger.log("RECONNECT_ATTEMPT", { attempt: this.reconnectAttempts });
+
+      setTimeout(() => {
+        if (!this.isOnline) {
+          this.testConnection().catch(() => {
+            GameLogger.log("RECONNECT_FAILED", {
+              attempt: this.reconnectAttempts,
+            });
+          });
+        }
+      }, 2000 * this.reconnectAttempts);
+    } else {
+      this.updateConnectionStatus("error", "Connection Failed");
+      GameLogger.log("RECONNECT_EXHAUSTED");
+    }
+  }
+
+  handleFirebaseUnavailable() {
+    firebaseAvailable = false;
+    this.isOnline = false;
+    this.updateConnectionStatus("error", "Firebase Not Available");
+    this.showFirebaseNotice();
+    this.disableOnlineFeatures();
+  }
+
+  updateConnectionStatus(status, text) {
+    const statusDot = document.getElementById("status-dot");
+    const statusText = document.getElementById("status-text");
+
+    if (statusDot && statusText) {
+      statusDot.className = `status-dot ${status}`;
+      statusText.textContent = text;
+    }
+  }
+
+  showFirebaseNotice() {
+    const notice = document.getElementById("firebase-notice");
+    if (notice) {
+      notice.classList.remove("hidden");
+    }
+  }
+
+  enableOnlineFeatures() {
+    const createStatus = document.getElementById("create-status");
+    const joinStatus = document.getElementById("join-status");
+    const createBtn = document.getElementById("create-room-btn");
+    const joinBtn = document.getElementById("join-room-btn");
+
+    if (createStatus) createStatus.textContent = "✓ Real-time multiplayer";
+    if (joinStatus) joinStatus.textContent = "✓ Join any room instantly";
+    if (createBtn) createBtn.disabled = false;
+    if (joinBtn) joinBtn.disabled = false;
+  }
+
+  disableOnlineFeatures() {
+    const createStatus = document.getElementById("create-status");
+    const joinStatus = document.getElementById("join-status");
+    const createBtn = document.getElementById("create-room-btn");
+    const joinBtn = document.getElementById("join-room-btn");
+
+    if (createStatus) createStatus.textContent = "❌ Requires Firebase setup";
+    if (joinStatus) joinStatus.textContent = "❌ Requires Firebase setup";
+    if (createBtn) createBtn.disabled = true;
+    if (joinBtn) joinBtn.disabled = true;
   }
 
   generatePlayerId() {
-    return 'player_' + Math.random().toString(36).substr(2, 9);
+    return (
+      "player_" + Math.random().toString(36).substr(2, 9) + "_" + Date.now()
+    );
   }
+}
 
-  generateRoomCode() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let result = '';
-    for (let i = 0; i < 6; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result;
-  }
-
-  setupPresenceSystem() {
-    if (!this.database) return;
-
-    try {
-      const connectedRef = this.database.ref('info/connected');
-      connectedRef.on('value', (snap) => {
-        if (snap.val() === true) {
-          this.updateConnectionStatus(true);
-        } else {
-          this.updateConnectionStatus(false);
-        }
-      });
-    } catch (error) {
-      console.error('Failed to setup presence system:', error);
-      this.updateConnectionStatus(false);
-    }
-  }
-
-  updateConnectionStatus(connected) {
-    const statusElement = document.getElementById('connection-status');
-    const statusSpan = statusElement?.querySelector('.status');
-    
-    if (statusSpan) {
-      if (connected) {
-        statusSpan.textContent = 'Connected';
-        statusSpan.className = 'status status--success';
-      } else {
-        statusSpan.textContent = 'Connection Lost';
-        statusSpan.className = 'status status--error';
-      }
-    }
-  }
-
-  async createRoom(gameConfig) {
-    if (!this.database) {
-      throw new Error('Firebase not initialized');
+// Firebase Manager - Bulletproof Operations
+class FirebaseManager {
+  static async createRoom(hostName, maxRounds) {
+    if (!firebaseAvailable) {
+      throw new Error("Firebase not available");
     }
 
-    try {
-      const roomCode = this.generateRoomCode();
-      const playerId = this.generatePlayerId();
-      const roomData = {
-        gameId: roomCode + '_' + Date.now(),
-        createdAt: Date.now(),
-        maxPlayers: 2,
-        gameConfig: {
-          maxGames: gameConfig.maxGames,
-          difficulty: gameConfig.difficulty || 'medium'
+    const roomCode = this.generateRoomCode();
+    const hostId = playerId;
+
+    const roomData = {
+      roomCode,
+      status: "WAITING_FOR_PLAYERS",
+      maxRounds: parseInt(maxRounds),
+      createdAt: firebase.database.ServerValue.TIMESTAMP,
+      lastActivity: firebase.database.ServerValue.TIMESTAMP,
+      host: hostId,
+      players: {
+        [hostId]: {
+          id: hostId,
+          name: hostName,
+          isHost: true,
+          connected: true,
+          ready: false,
         },
-        players: {
-          [playerId]: {
-            id: playerId,
-            name: gameConfig.hostName,
-            connected: true,
-            score: 0,
-            choice: null,
-            joinedAt: Date.now(),
-            isHost: true
-          }
-        },
-        gameState: {
-          status: 'waiting',
-          currentRound: 0,
-          bothPlayersReady: false,
-          roundResults: []
-        }
-      };
-
-      await this.database.ref(`rooms/${roomCode}`).set(roomData);
-
-      await this.database.ref(`rooms/${roomCode}/players_check/${playerId}`).set({
-        id: playerId,
-        name: gameConfig.hostName,
-      });
-      
-      // Setup presence for host
-      const presenceRef = this.database.ref(`rooms/${roomCode}/players/${playerId}/connected`);
-      presenceRef.onDisconnect().set(false);
-      
-      // Set up room cleanup on disconnect
-      const roomRef = this.database.ref(`rooms/${roomCode}`);
-      roomRef.onDisconnect().remove();
-
-      gameState.player1.id = playerId;
-      gameState.isHost = true;
-      this.connectionRef = presenceRef;
-
-      return { roomCode, playerId };
-    } catch (error) {
-      console.error('Failed to create room:', error);
-      throw new Error('Failed to create room: ' + error.message);
-    }
-  }
-
-  async joinRoom(roomCode, playerName) {
-    if (!this.database) {
-      throw new Error('Firebase not initialized');
-    }
+      },
+      game: {
+        currentRound: 1,
+        scores: { [hostId]: 0 },
+        roundWins: { [hostId]: 0 },
+        currentChoices: {},
+        lastResult: null,
+        seriesWinner: null,
+      },
+    };
 
     try {
-      const roomSnapshot = await this.database.ref(`rooms/${roomCode}`).once('value');
-      if (!roomSnapshot.exists()) {
-        throw new Error('Room not found');
-      }
-
-      const roomData = roomSnapshot.val();
-      const playerCount = Object.keys(roomData.players || {}).length;
-      
-      if (playerCount >= 2) {
-        throw new Error('Room is full');
-      }
-
-      const playerId = this.generatePlayerId();
-      await this.database.ref(`rooms/${roomCode}/players/${playerId}`).set({
-        id: playerId,
-        name: playerName,
-        connected: true,
-        score: 0,
-        choice: null,
-        joinedAt: Date.now(),
-        isHost: false
-      });
-
-      await this.database.ref(`rooms/${roomCode}/players_check/${playerId}`).set({
-        id: playerId,
-        name: playerName,
-      });
-
-      // Setup presence for guest
-      const presenceRef = this.database.ref(`rooms/${roomCode}/players/${playerId}/connected`);
-      presenceRef.onDisconnect().set(false);
-      
-      // Clean up player on disconnect
-      const playerRef = this.database.ref(`rooms/${roomCode}/players/${playerId}`);
-      playerRef.onDisconnect().remove();
-
-      gameState.player1.id = playerId;
-      gameState.isHost = false;
-      this.connectionRef = presenceRef;
-
-      return { playerId, hostName: Object.values(roomData.players)[0].name };
+      await database.ref(`rooms/${roomCode}`).set(roomData);
+      GameLogger.log("ROOM_CREATED", { roomCode, hostId, maxRounds });
+      return { roomCode, playerId: hostId };
     } catch (error) {
-      console.error('Failed to join room:', error);
+      GameLogger.log("ROOM_CREATE_FAILED", { error: error.message });
       throw error;
     }
   }
 
-  async submitChoice(roomCode, playerId, choice) {
-    if (!this.database) {
-      throw new Error('Firebase not initialized');
+  static async joinRoom(roomCode, playerName) {
+    if (!firebaseAvailable) {
+      throw new Error("Firebase not available");
     }
+
+    GameLogger.log("JOIN_ROOM_ATTEMPT", { roomCode, playerName });
 
     try {
-      await this.database.ref(`rooms/${roomCode}/players/${playerId}/choice`).set(choice);
-      
-      // Check if both players have made choices
-      const roomSnapshot = await this.database.ref(`rooms/${roomCode}`).once('value');
-      const roomData = roomSnapshot.val();
-      const players = Object.values(roomData.players || {});
-      
-      if (players.length === 2 && players.every(p => p.choice !== null)) {
-        await this.database.ref(`rooms/${roomCode}/gameState/bothPlayersReady`).set(true);
-      }
-    } catch (error) {
-      console.error('Failed to submit choice:', error);
-      throw new Error('Failed to submit choice: ' + error.message);
-    }
-  }
-
-  async updateGameState(roomCode, updates) {
-    if (!this.database) {
-      throw new Error('Firebase not initialized');
-    }
-
-    try {
-      await this.database.ref(`rooms/${roomCode}/gameState`).update(updates);
-    } catch (error) {
-      console.error('Failed to update game state:', error);
-      throw new Error('Failed to update game state: ' + error.message);
-    }
-  }
-
-  async updatePlayerScore(roomCode, playerId, score) {
-    if (!this.database) {
-      throw new Error('Firebase not initialized');
-    }
-
-    try {
-      await this.database.ref(`rooms/${roomCode}/players/${playerId}/score`).set(score);
-    } catch (error) {
-      console.error('Failed to update score:', error);
-      throw new Error('Failed to update score: ' + error.message);
-    }
-  }
-
-  setupRealTimeListeners(roomCode, playerId) {
-    if (!this.database) return;
-
-    try {
-      // Listen for room changes
-      const roomRef = this.database.ref(`rooms/${roomCode}`);
-      const roomListener = roomRef.on('value', (snapshot) => {
-        if (!snapshot.exists()) {
-          this.handleRoomRemoved();
-          return;
-        }
-
-        const roomData = snapshot.val();
-        this.handleRoomUpdate(roomData, playerId);
-      });
-
-      gameState.roomListeners.push({ ref: roomRef, listener: roomListener });
-
-      // Listen for player connections
-      const playersRef = this.database.ref(`rooms/${roomCode}/players_check`);
-      const playersListener = playersRef.on('value', (snapshot) => {
-        const players = snapshot.val() || {};
-        this.handlePlayersUpdate(players, playerId);
-      });
-
-      gameState.roomListeners.push({ ref: playersRef, listener: playersListener });
-
-      // Listen for game state changes
-      const gameStateRef = this.database.ref(`rooms/${roomCode}/gameState`);
-      const gameStateListener = gameStateRef.on('value', (snapshot) => {
-        const gameStateData = snapshot.val() || {};
-        this.handleGameStateUpdate(gameStateData);
-      });
-
-      gameState.roomListeners.push({ ref: gameStateRef, listener: gameStateListener });
-
-    } catch (error) {
-      console.error('Failed to setup listeners:', error);
-    }
-  }
-
-  handleRoomUpdate(roomData, currentPlayerId) {
-    const players = Object.values(roomData.players || {});
-    
-    if (players.length === 2) {
-      const currentPlayer = players.find(p => p.id === currentPlayerId);
-      const opponent = players.find(p => p.id !== currentPlayerId);
-      
-      if (currentPlayer && opponent) {
-        // Update UI with current game state
-        gameState.player1.name = currentPlayer.name;
-        gameState.player1.score = currentPlayer.score;
-        gameState.player2.name = opponent.name;
-        gameState.player2.score = opponent.score;
-        
-        if (window.gameEngine) {
-          window.gameEngine.updateGameUI();
-        }
-
-        // Check if both players have made choices
-        if (currentPlayer.choice && opponent.choice && roomData.gameState.bothPlayersReady) {
-          this.handleBothChoicesMade(currentPlayer, opponent);
-        }
-
-        // Check opponent connection
-        this.handleOpponentConnection(opponent.connected);
-      }
-    }
-  }
-
-  handlePlayersUpdate(players, currentPlayerId) {
-    const playerCount = Object.keys(players).length;
-    
-    if (playerCount === 2) {
-      const roomStatus = document.getElementById('room-status');
-      if (roomStatus) {
-        roomStatus.textContent = 'Player joined! Starting game...';
-        roomStatus.className = 'status status--success';
-        
-        setTimeout(() => {
-          if (window.gameEngine) {
-            window.gameEngine.initializeOnlineGame();
-            window.navigationManager.navigateTo('game-play');
+      const result = await database
+        .ref(`rooms/${roomCode}`)
+        .transaction((room) => {
+          if (!room) {
+            GameLogger.log("JOIN_ROOM_NOT_FOUND", { roomCode });
+            return null; // Room doesn't exist
           }
-        }, 2000);
-      }
-    } else if (playerCount === 1) {
-      const roomStatus = document.getElementById('room-status');
-      if (roomStatus) {
-        roomStatus.textContent = 'Waiting for player to join...';
-        roomStatus.className = 'status status--info';
-      }
-    }
-  }
 
-  handleGameStateUpdate(gameStateData) {
-    if (gameStateData.status === 'finished') {
-      setTimeout(() => {
-        if (window.gameEngine) {
-          window.gameEngine.endGame();
-        }
-      }, 1000);
-    }
-  }
+          if (room.status !== "WAITING_FOR_PLAYERS") {
+            GameLogger.log("JOIN_ROOM_WRONG_STATUS", {
+              roomCode,
+              status: room.status,
+            });
+            return; // Game already in progress
+          }
 
-  handleBothChoicesMade(currentPlayer, opponent) {
-    gameState.player1.choice = currentPlayer.choice;
-    gameState.player2.choice = opponent.choice;
-    
-    setTimeout(() => {
-      if (window.gameEngine) {
-        window.gameEngine.resolveOnlineRound();
-      }
-    }, 1000);
-  }
+          if (Object.keys(room.players).length >= 2) {
+            GameLogger.log("JOIN_ROOM_FULL", { roomCode });
+            return; // Room full
+          }
 
-  handleOpponentConnection(connected) {
-    const statusElement = document.getElementById('connection-status');
-    const statusSpan = statusElement?.querySelector('.status');
-    
-    if (statusSpan && gameState.gameMode === 'online') {
-      if (!connected) {
-        statusSpan.textContent = 'Opponent Disconnected';
-        statusSpan.className = 'status status--warning';
-      } else {
-        statusSpan.textContent = 'Connected';
-        statusSpan.className = 'status status--success';
-      }
-    }
-  }
+          const guestId = playerId;
+          room.players[guestId] = {
+            id: guestId,
+            name: playerName,
+            isHost: false,
+            connected: true,
+            ready: true,
+          };
 
-  handleRoomRemoved() {
-    if (gameState.gameMode === 'online' && gameState.isGameActive) {
-      alert('Game room was closed. Returning to main menu.');
-      if (window.gameEngine) {
-        window.gameEngine.quitGame();
-      }
-    }
-  }
+          room.game.scores[guestId] = 0;
+          room.game.roundWins[guestId] = 0;
+          room.status = "GAME_READY";
+          room.lastActivity = firebase.database.ServerValue.TIMESTAMP;
 
-  async handlePlayerDisconnection(roomCode, playerId) {
-    if (!this.database) return;
-
-    try {
-      // Remove player from room
-      await this.database.ref(`rooms/${roomCode}/players/${playerId}`).remove();
-      
-      // Check if room is empty and clean up
-      const roomSnapshot = await this.database.ref(`rooms/${roomCode}`).once('value');
-      if (roomSnapshot.exists()) {
-        const roomData = roomSnapshot.val();
-        const playerCount = Object.keys(roomData.players || {}).length;
-        
-        if (playerCount === 0) {
-          await this.database.ref(`rooms/${roomCode}`).remove();
-        }
-      }
-    } catch (error) {
-      console.error('Failed to handle player disconnection:', error);
-    }
-  }
-
-  async saveToLeaderboard(playerData) {
-    if (!this.database) return;
-
-    try {
-      const leaderboardRef = this.database.ref(`leaderboard/${playerData.id}`);
-      const snapshot = await leaderboardRef.once('value');
-      
-      let existingData = snapshot.val() || {
-        name: playerData.name,
-        totalGames: 0,
-        totalWins: 0,
-        totalLosses: 0,
-        totalTies: 0,
-        winStreak: 0,
-        maxWinStreak: 0
-      };
-
-      existingData.totalGames += playerData.totalGames;
-      existingData.totalWins += playerData.totalWins;
-      existingData.totalLosses += playerData.totalLosses;
-      existingData.totalTies += playerData.totalTies;
-
-      if (playerData.won) {
-        existingData.winStreak++;
-        existingData.maxWinStreak = Math.max(existingData.maxWinStreak, existingData.winStreak);
-      } else if (playerData.lost) {
-        existingData.winStreak = 0;
-      }
-
-      await leaderboardRef.set(existingData);
-    } catch (error) {
-      console.error('Failed to save to leaderboard:', error);
-    }
-  }
-
-  async loadLeaderboard() {
-    if (!this.database) return [];
-
-    try {
-      const snapshot = await this.database.ref('leaderboard').once('value');
-      const data = snapshot.val() || {};
-      return Object.values(data);
-    } catch (error) {
-      console.error('Failed to load leaderboard:', error);
-      return [];
-    }
-  }
-
-  cleanup() {
-    // Remove all listeners
-    gameState.roomListeners.forEach(({ ref, listener }) => {
-      ref.off('value', listener);
-    });
-    gameState.roomListeners = [];
-
-    // Remove presence
-    if (this.connectionRef) {
-      this.connectionRef.off();
-      this.connectionRef = null;
-    }
-  }
-}
-
-// Navigation System
-class NavigationManager {
-  constructor() {
-    this.init();
-  }
-
-  init() {
-    // Wait for DOM to be ready
-    setTimeout(() => {
-      this.setupEventListeners();
-      this.updateNavigation();
-    }, 100);
-  }
-
-  setupEventListeners() {
-    document.querySelectorAll('[data-section]').forEach(element => {
-      element.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const section = e.currentTarget.dataset.section;
-        console.log('Navigating to:', section);
-        this.navigateTo(section);
-      });
-    });
-  }
-
-  navigateTo(sectionId) {
-    console.log('NavigationManager: navigating to', sectionId);
-    
-    // Hide all sections
-    document.querySelectorAll('.section').forEach(section => {
-      section.classList.remove('active');
-    });
-
-    // Show target section
-    const targetSection = document.getElementById(sectionId);
-    if (targetSection) {
-      targetSection.classList.add('active');
-      gameState.currentSection = sectionId;
-      this.updateNavigation();
-      
-      // Hide connection status on non-game sections
-      const connectionStatus = document.getElementById('connection-status');
-      if (connectionStatus) {
-        if (sectionId !== 'game-play') {
-          connectionStatus.classList.add('hidden');
-        } else {
-          connectionStatus.classList.remove('hidden');
-        }
-      }
-    }
-  }
-
-  updateNavigation() {
-    const navBtn = document.querySelector('#main-nav .nav-btn');
-    if (navBtn) {
-      if (gameState.currentSection === 'main-menu') {
-        navBtn.classList.remove('show');
-      } else {
-        navBtn.classList.add('show');
-      }
-    }
-  }
-}
-
-// Game Logic
-class GameEngine {
-  constructor() {
-    this.firebaseManager = new FirebaseGameManager();
-    this.initializeEventListeners();
-  }
-
-  initializeEventListeners() {
-    // Wait for DOM to be ready
-    setTimeout(() => {
-      this.setupAllEventListeners();
-    }, 100);
-  }
-
-  setupAllEventListeners() {
-    const startGameBtn = document.getElementById('start-game');
-    if (startGameBtn) {
-      startGameBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        console.log('Start game clicked');
-        this.startGame();
-      });
-    }
-    
-    document.querySelectorAll('input[name="gameMode"]').forEach(radio => {
-      radio.addEventListener('change', (e) => this.handleGameModeChange(e.target.value));
-    });
-
-    const joinGameBtn = document.getElementById('join-game-btn');
-    if (joinGameBtn) {
-      joinGameBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        this.joinGame();
-      });
-    }
-
-    document.querySelectorAll('.choice-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        this.makeChoice(e.currentTarget.dataset.choice);
-      });
-    });
-
-    const nextRoundBtn = document.getElementById('next-round');
-    if (nextRoundBtn) {
-      nextRoundBtn.addEventListener('click', () => this.nextRound());
-    }
-
-    const playAgainBtn = document.getElementById('play-again');
-    if (playAgainBtn) {
-      playAgainBtn.addEventListener('click', () => this.playAgain());
-    }
-
-    const playAgainModalBtn = document.getElementById('play-again-modal');
-    if (playAgainModalBtn) {
-      playAgainModalBtn.addEventListener('click', () => this.playAgain());
-    }
-
-    const quitGameBtn = document.getElementById('quit-game');
-    if (quitGameBtn) {
-      quitGameBtn.addEventListener('click', () => this.quitGame());
-    }
-
-    const mainMenuModalBtn = document.getElementById('main-menu-modal');
-    if (mainMenuModalBtn) {
-      mainMenuModalBtn.addEventListener('click', () => this.quitGame());
-    }
-
-    const copyCodeBtn = document.getElementById('copy-code');
-    if (copyCodeBtn) {
-      copyCodeBtn.addEventListener('click', () => this.copyRoomCode());
-    }
-  }
-
-  handleGameModeChange(mode) {
-    gameState.gameMode = mode;
-    const difficultyGroup = document.getElementById('difficulty-group');
-    const roomCodeDisplay = document.getElementById('room-code-display');
-    
-    if (mode === 'local') {
-      if (difficultyGroup) difficultyGroup.style.display = 'block';
-      if (roomCodeDisplay) roomCodeDisplay.classList.add('hidden');
-    } else {
-      if (difficultyGroup) difficultyGroup.style.display = 'none';
-      if (roomCodeDisplay) roomCodeDisplay.classList.remove('hidden');
-    }
-  }
-
-  copyRoomCode() {
-    const codeElement = document.getElementById('room-code-text');
-    if (codeElement) {
-      const code = codeElement.textContent;
-      navigator.clipboard.writeText(code).then(() => {
-        const btn = document.getElementById('copy-code');
-        const originalText = btn.textContent;
-        btn.textContent = 'Copied!';
-        setTimeout(() => {
-          btn.textContent = originalText;
-        }, 2000);
-      });
-    }
-  }
-
-  async joinGame() {
-    const roomCodeInput = document.getElementById('room-code-input');
-    const playerNameInput = document.getElementById('join-player-name');
-    const statusElement = document.getElementById('join-status');
-    
-    if (!roomCodeInput || !playerNameInput || !statusElement) return;
-
-    const roomCode = roomCodeInput.value.toUpperCase();
-    const playerName = playerNameInput.value || 'Player 2';
-
-    if (!roomCode || roomCode.length !== 6) {
-      this.showStatus(statusElement, 'Please enter a valid 6-digit room code', 'error');
-      return;
-    }
-
-    try {
-      this.showStatus(statusElement, 'Joining game...', 'info');
-      
-      const result = await this.firebaseManager.joinRoom(roomCode, playerName);
-      gameState.currentRoomCode = roomCode;
-      gameState.player1.name = playerName;
-      gameState.player2.name = result.hostName;
-      gameState.gameMode = 'online';
-
-      this.firebaseManager.setupRealTimeListeners(roomCode, result.playerId);
-      
-      this.showStatus(statusElement, 'Successfully joined the game!', 'success');
-      
-    } catch (error) {
-      this.showStatus(statusElement, error.message, 'error');
-    }
-  }
-
-  async startGame() {
-    console.log('Starting game with mode:', gameState.gameMode);
-    
-    const playerNameInput = document.getElementById('playerName');
-    const gameCountSelect = document.getElementById('gameCount');
-    const difficultySelect = document.getElementById('difficulty');
-    
-    if (playerNameInput) {
-      gameState.player1.name = playerNameInput.value || 'Player 1';
-    }
-    if (gameCountSelect) {
-      gameState.maxGames = parseInt(gameCountSelect.value);
-    }
-    if (difficultySelect) {
-      gameState.difficulty = difficultySelect.value;
-    }
-
-    if (gameState.gameMode === 'local') {
-      gameState.player2.name = 'Computer';
-      this.initializeGame();
-      window.navigationManager.navigateTo('game-play');
-    } else {
-      try {
-        const result = await this.firebaseManager.createRoom({
-          hostName: gameState.player1.name,
-          maxGames: gameState.maxGames,
-          difficulty: gameState.difficulty
+          GameLogger.log("JOIN_ROOM_SUCCESS", { roomCode, guestId });
+          return room;
         });
-        
-        gameState.currentRoomCode = result.roomCode;
-        const roomCodeText = document.getElementById('room-code-text');
-        if (roomCodeText) {
-          roomCodeText.textContent = result.roomCode;
-        }
-        
-        this.firebaseManager.setupRealTimeListeners(result.roomCode, result.playerId);
-        
-      } catch (error) {
-        alert('Failed to create room: ' + error.message);
+
+      if (result.committed && result.snapshot.val()) {
+        return { success: true, playerId };
+      } else {
+        throw new Error("Failed to join room - room may be full or not exist");
       }
+    } catch (error) {
+      GameLogger.log("JOIN_ROOM_FAILED", { roomCode, error: error.message });
+      throw error;
     }
   }
 
-  initializeOnlineGame() {
-    this.initializeGame();
-  }
-
-  initializeGame() {
-    gameState.currentGame = 0;
-    gameState.player1.score = 0;
-    gameState.player2.score = 0;
-    gameState.gameHistory = [];
-    gameState.playerHistory = [];
-    gameState.isGameActive = true;
-    gameState.waitingForChoice = false;
-
-    this.updateGameUI();
-    this.resetRound();
-  }
-
-  updateGameUI() {
-    const player1NameEl = document.getElementById('player1-name');
-    const player2NameEl = document.getElementById('player2-name');
-    const player1ScoreEl = document.getElementById('player1-score');
-    const player2ScoreEl = document.getElementById('player2-score');
-    const progressEl = document.getElementById('game-progress-text');
-    
-    if (player1NameEl) player1NameEl.textContent = gameState.player1.name;
-    if (player2NameEl) player2NameEl.textContent = gameState.player2.name;
-    if (player1ScoreEl) player1ScoreEl.textContent = gameState.player1.score;
-    if (player2ScoreEl) player2ScoreEl.textContent = gameState.player2.score;
-    
-    if (progressEl) {
-      const progressText = gameState.maxGames === -1 
-        ? `Round ${gameState.currentGame + 1}`
-        : `Round ${gameState.currentGame + 1} of ${gameState.maxGames}`;
-      progressEl.textContent = progressText;
+  static async submitChoice(roomCode, playerId, choice) {
+    if (!firebaseAvailable) {
+      throw new Error("Firebase not available");
     }
-  }
 
-  resetRound() {
-    gameState.player1.choice = null;
-    gameState.player2.choice = null;
-    gameState.waitingForChoice = false;
+    GameLogger.log("SUBMIT_CHOICE", { roomCode, playerId, choice });
 
-    const elements = {
-      player1Choice: document.getElementById('player1-choice'),
-      player1ChoiceName: document.getElementById('player1-choice-name'),
-      player2Choice: document.getElementById('player2-choice'),
-      player2ChoiceName: document.getElementById('player2-choice-name'),
-      roundResult: document.getElementById('round-result'),
-      resultExplanation: document.getElementById('result-explanation'),
-      nextRound: document.getElementById('next-round'),
-      playAgain: document.getElementById('play-again')
-    };
+    try {
+      // Atomic choice submission
+      const updates = {};
+      updates[`game/currentChoices/${playerId}`] = choice;
+      updates[`players/${playerId}/lastAction`] =
+        firebase.database.ServerValue.TIMESTAMP;
+      updates["lastActivity"] = firebase.database.ServerValue.TIMESTAMP;
 
-    if (elements.player1Choice) elements.player1Choice.textContent = '?';
-    if (elements.player1ChoiceName) elements.player1ChoiceName.textContent = 'Make your choice';
-    if (elements.player2Choice) elements.player2Choice.textContent = '?';
-    if (elements.player2ChoiceName) elements.player2ChoiceName.textContent = 'Waiting...';
-    if (elements.roundResult) elements.roundResult.textContent = '';
-    if (elements.resultExplanation) elements.resultExplanation.textContent = '';
+      await database.ref(`rooms/${roomCode}`).update(updates);
 
-    document.querySelectorAll('.choice-btn').forEach(btn => {
-      btn.classList.remove('selected');
-      btn.disabled = false;
-    });
+      // Check if both players have chosen
+      const snapshot = await database
+        .ref(`rooms/${roomCode}/game/currentChoices`)
+        .once("value");
+      const choices = snapshot.val() || {};
 
-    document.querySelectorAll('.choice-icon').forEach(icon => {
-      icon.classList.remove('winner', 'loser');
-    });
-
-    if (elements.nextRound) elements.nextRound.classList.add('hidden');
-    if (elements.playAgain) elements.playAgain.classList.add('hidden');
-  }
-
-  async makeChoice(choice) {
-    if (!gameState.isGameActive || gameState.waitingForChoice) return;
-
-    gameState.player1.choice = choice;
-    gameState.waitingForChoice = true;
-
-    const choiceData = choices.find(c => c.id === choice);
-    const player1Choice = document.getElementById('player1-choice');
-    const player1ChoiceName = document.getElementById('player1-choice-name');
-    
-    if (player1Choice) player1Choice.textContent = choiceData.emoji;
-    if (player1ChoiceName) player1ChoiceName.textContent = choiceData.name;
-
-    document.querySelectorAll('.choice-btn').forEach(btn => {
-      btn.classList.remove('selected');
-      if (btn.dataset.choice === choice) {
-        btn.classList.add('selected');
+      if (Object.keys(choices).length === 2) {
+        const playerIds = Object.keys(choices);
+        await this.processRound(roomCode, playerIds, choices);
       }
-      btn.disabled = true;
-    });
+    } catch (error) {
+      GameLogger.log("SUBMIT_CHOICE_FAILED", {
+        roomCode,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
 
-    gameState.playerHistory.push(choice);
+  static async processRound(roomCode, playerIds, choices) {
+    GameLogger.log("PROCESS_ROUND", { roomCode, choices });
 
-    if (gameState.gameMode === 'local') {
-      gameState.player2.choice = this.getComputerChoice();
-      setTimeout(() => {
-        this.resolveRound();
-      }, 1000);
-    } else {
-      try {
-        await this.firebaseManager.submitChoice(
-          gameState.currentRoomCode,
-          gameState.player1.id,
-          choice
-        );
-      } catch (error) {
-        console.error('Failed to submit choice:', error);
+    try {
+      const player1Id = playerIds[0];
+      const player2Id = playerIds[1];
+      const result = this.calculateWinner(
+        choices[player1Id],
+        choices[player2Id]
+      );
+
+      // Update round wins (NOT game scores yet)
+      const updates = {};
+      if (result.winner !== "tie") {
+        const winnerId = result.winner === 1 ? player1Id : player2Id;
+        updates[`game/roundWins/${winnerId}`] =
+          firebase.database.ServerValue.increment(1);
       }
+
+      // Set round result
+      updates["game/lastResult"] = {
+        player1Choice: choices[player1Id],
+        player2Choice: choices[player2Id],
+        winner: result.winner,
+        explanation: result.explanation,
+        timestamp: firebase.database.ServerValue.TIMESTAMP,
+      };
+      updates["status"] = "ROUND_COMPLETE";
+      updates["lastActivity"] = firebase.database.ServerValue.TIMESTAMP;
+
+      await database.ref(`rooms/${roomCode}`).update(updates);
+
+      // Check if series is complete after delay
+      setTimeout(() => this.checkSeriesComplete(roomCode), 3000);
+    } catch (error) {
+      GameLogger.log("PROCESS_ROUND_FAILED", {
+        roomCode,
+        error: error.message,
+      });
+      throw error;
     }
   }
 
-  getComputerChoice() {
-    const allChoices = choices.map(c => c.id);
-    
-    switch (gameState.difficulty) {
-      case 'easy':
-        return this.getRandomChoice();
-      case 'medium':
-        return this.getMediumAIChoice(allChoices);
-      case 'hard':
-        return this.getHardAIChoice(allChoices);
-      default:
-        return this.getRandomChoice();
-    }
-  }
+  static async checkSeriesComplete(roomCode) {
+    GameLogger.log("CHECK_SERIES_COMPLETE", { roomCode });
 
-  getRandomChoice() {
-    const allChoices = choices.map(c => c.id);
-    return allChoices[Math.floor(Math.random() * allChoices.length)];
-  }
+    try {
+      const snapshot = await database.ref(`rooms/${roomCode}`).once("value");
+      const room = snapshot.val();
 
-  getMediumAIChoice(allChoices) {
-    if (gameState.playerHistory.length < 3) {
-      return this.getRandomChoice();
-    }
-
-    const recent = gameState.playerHistory.slice(-3);
-    const mostCommon = this.getMostCommonChoice(recent);
-    
-    if (mostCommon && Math.random() < 0.6) {
-      return this.getCounterChoice(mostCommon);
-    }
-    
-    return this.getRandomChoice();
-  }
-
-  getHardAIChoice(allChoices) {
-    if (gameState.playerHistory.length < 2) {
-      return this.getRandomChoice();
-    }
-
-    const recent = gameState.playerHistory.slice(-5);
-    const sequence = this.findSequencePattern(recent);
-    
-    if (sequence && Math.random() < 0.7) {
-      return this.getCounterChoice(sequence);
-    }
-    
-    const mostCommon = this.getMostCommonChoice(recent);
-    if (mostCommon && Math.random() < 0.8) {
-      return this.getCounterChoice(mostCommon);
-    }
-    
-    return this.getRandomChoice();
-  }
-
-  getMostCommonChoice(choices) {
-    const counts = {};
-    choices.forEach(choice => {
-      counts[choice] = (counts[choice] || 0) + 1;
-    });
-    
-    return Object.keys(counts).reduce((a, b) => 
-      counts[a] > counts[b] ? a : b
-    );
-  }
-
-  findSequencePattern(choices) {
-    if (choices.length < 4) return null;
-    
-    const lastTwo = choices.slice(-2);
-    for (let i = 0; i < choices.length - 3; i++) {
-      if (choices[i] === lastTwo[0] && choices[i + 1] === lastTwo[1]) {
-        if (i + 2 < choices.length) {
-          return choices[i + 2];
-        }
+      if (!room) {
+        GameLogger.log("SERIES_CHECK_ROOM_NOT_FOUND", { roomCode });
+        return;
       }
-    }
-    
-    return null;
-  }
 
-  getCounterChoice(choice) {
-    const allChoices = choices.map(c => c.id);
-    const counters = allChoices.filter(c => 
-      gameRules[c].beats.includes(choice)
-    );
-    
-    if (counters.length > 0) {
-      return counters[Math.floor(Math.random() * counters.length)];
-    }
-    
-    return this.getRandomChoice();
-  }
+      const roundWins = room.game.roundWins;
+      const maxRounds = room.maxRounds;
+      const requiredWins = Math.ceil(maxRounds / 2);
 
-  resolveRound() {
-    this.processRoundResult();
-  }
+      const winner = Object.keys(roundWins).find(
+        (id) => roundWins[id] >= requiredWins
+      );
 
-  resolveOnlineRound() {
-    this.processRoundResult();
-    this.updateFirebaseScores();
-  }
+      if (winner) {
+        // Series complete
+        await database.ref(`rooms/${roomCode}`).update({
+          status: "SERIES_COMPLETE",
+          "game/seriesWinner": winner,
+          "game/finalScores": roundWins,
+          "game/completedAt": firebase.database.ServerValue.TIMESTAMP,
+          lastActivity: firebase.database.ServerValue.TIMESTAMP,
+        });
 
-  async updateFirebaseScores() {
-    if (gameState.gameMode === 'online' && gameState.currentRoomCode) {
-      try {
-        await this.firebaseManager.updatePlayerScore(
-          gameState.currentRoomCode,
-          gameState.player1.id,
-          gameState.player1.score
-        );
+        GameLogger.log("SERIES_COMPLETE", {
+          roomCode,
+          winner,
+          finalScores: roundWins,
+        });
+      } else {
+        // Continue to next round
+        await database.ref(`rooms/${roomCode}`).update({
+          status: "ROUND_IN_PROGRESS",
+          "game/currentRound": firebase.database.ServerValue.increment(1),
+          "game/currentChoices": {},
+          "game/lastResult": null,
+          lastActivity: firebase.database.ServerValue.TIMESTAMP,
+        });
 
-        if (this.isGameOver()) {
-          await this.firebaseManager.updateGameState(gameState.currentRoomCode, {
-            status: 'finished'
-          });
-        } else {
-          await this.firebaseManager.updateGameState(gameState.currentRoomCode, {
-            currentRound: gameState.currentGame,
-            bothPlayersReady: false
-          });
-
-          // Clear choices for next round
-          const players = await database.ref(`rooms/${gameState.currentRoomCode}/players`).once('value');
-          const playersData = players.val() || {};
-          
-          for (let playerId of Object.keys(playersData)) {
-            await database.ref(`rooms/${gameState.currentRoomCode}/players/${playerId}/choice`).set(null);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to update Firebase scores:', error);
+        GameLogger.log("NEXT_ROUND_STARTED", {
+          roomCode,
+          currentRound: room.game.currentRound + 1,
+        });
       }
+    } catch (error) {
+      GameLogger.log("SERIES_CHECK_FAILED", { roomCode, error: error.message });
     }
   }
 
-  processRoundResult() {
-    const player1Choice = gameState.player1.choice;
-    const player2Choice = gameState.player2.choice;
-
-    const p2ChoiceData = choices.find(c => c.id === player2Choice);
-    const player2ChoiceEl = document.getElementById('player2-choice');
-    const player2ChoiceNameEl = document.getElementById('player2-choice-name');
-    
-    if (player2ChoiceEl) player2ChoiceEl.textContent = p2ChoiceData.emoji;
-    if (player2ChoiceNameEl) player2ChoiceNameEl.textContent = p2ChoiceData.name;
-
-    const result = this.determineWinner(player1Choice, player2Choice);
-    
-    if (result.winner === 1) {
-      gameState.player1.score++;
-    } else if (result.winner === 2) {
-      gameState.player2.score++;
-    }
-
-    this.displayRoundResult(result);
-    this.updateGameUI();
-
-    gameState.gameHistory.push({
-      round: gameState.currentGame + 1,
-      player1Choice,
-      player2Choice,
-      winner: result.winner,
-      explanation: result.explanation
-    });
-
-    gameState.currentGame++;
-
-    if (this.isGameOver()) {
-      setTimeout(() => this.endGame(), 2000);
-    } else {
-      const nextRoundBtn = document.getElementById('next-round');
-      if (nextRoundBtn) nextRoundBtn.classList.remove('hidden');
-    }
-  }
-
-  determineWinner(choice1, choice2) {
+  static calculateWinner(choice1, choice2) {
     if (choice1 === choice2) {
-      return { winner: 0, explanation: "It's a tie!" };
+      return { winner: "tie", explanation: "It's a tie!" };
     }
 
-    const choice1Rules = gameRules[choice1];
-    const choice1Data = choices.find(c => c.id === choice1);
-    const choice2Data = choices.find(c => c.id === choice2);
+    const choice1Rules = GAME_RULES[choice1];
+    const choice1Data = CHOICES.find((c) => c.id === choice1);
+    const choice2Data = CHOICES.find((c) => c.id === choice2);
 
     if (choice1Rules.beats.includes(choice2)) {
       const actionIndex = choice1Rules.beats.indexOf(choice2);
       const action = choice1Rules.actions[actionIndex];
       return {
         winner: 1,
-        explanation: `${choice1Data.name} ${action} ${choice2Data.name}`
+        explanation: `${choice1Data.name} ${action} ${choice2Data.name}`,
       };
     } else {
-      const choice2Rules = gameRules[choice2];
+      const choice2Rules = GAME_RULES[choice2];
       const actionIndex = choice2Rules.beats.indexOf(choice1);
       const action = choice2Rules.actions[actionIndex];
       return {
         winner: 2,
-        explanation: `${choice2Data.name} ${action} ${choice1Data.name}`
+        explanation: `${choice2Data.name} ${action} ${choice1Data.name}`,
       };
     }
   }
 
-  displayRoundResult(result) {
-    const resultElement = document.getElementById('round-result');
-    const explanationElement = document.getElementById('result-explanation');
-    const player1Icon = document.getElementById('player1-choice');
-    const player2Icon = document.getElementById('player2-choice');
-    
-    if (resultElement) {
-      if (result.winner === 1) {
-        resultElement.textContent = 'You Win!';
-        resultElement.className = 'win';
-        if (player1Icon) player1Icon.classList.add('winner');
-        if (player2Icon) player2Icon.classList.add('loser');
-      } else if (result.winner === 2) {
-        resultElement.textContent = `${gameState.player2.name} Wins!`;
-        resultElement.className = 'lose';
-        if (player1Icon) player1Icon.classList.add('loser');
-        if (player2Icon) player2Icon.classList.add('winner');
+  static setupRoomListener(roomCode) {
+    if (!firebaseAvailable || !database) {
+      return;
+    }
+
+    GameLogger.log("SETUP_ROOM_LISTENER", { roomCode });
+
+    const roomRef = database.ref(`rooms/${roomCode}`);
+
+    const listener = roomRef.on("value", (snapshot) => {
+      const roomData = snapshot.val();
+      if (roomData) {
+        GameLogger.log("ROOM_UPDATE_RECEIVED", { status: roomData.status });
+        gameData = roomData;
+        GameStateManager.handleRoomUpdate(roomData);
       } else {
-        resultElement.textContent = "It's a Tie!";
-        resultElement.className = 'tie';
+        GameLogger.log("ROOM_DELETED", { roomCode });
+        GameStateManager.handleRoomDeleted();
+      }
+    });
+
+    gameListeners.push({ ref: roomRef, listener });
+  }
+
+  static async leaveRoom(roomCode) {
+    if (!firebaseAvailable || !roomCode) {
+      return;
+    }
+
+    GameLogger.log("LEAVE_ROOM", { roomCode, playerId });
+
+    try {
+      // Mark player as disconnected
+      await database
+        .ref(`rooms/${roomCode}/players/${playerId}/connected`)
+        .set(false);
+
+      // Clean up listeners
+      gameListeners.forEach(({ ref, listener }) => {
+        if (ref && typeof ref.off === "function") {
+          ref.off("value", listener);
+        }
+      });
+      gameListeners = [];
+    } catch (error) {
+      GameLogger.log("LEAVE_ROOM_FAILED", { roomCode, error: error.message });
+    }
+  }
+
+  static generateRoomCode() {
+    return Math.random().toString(36).substring(2, 8).toUpperCase();
+  }
+}
+
+// Game State Manager - Bulletproof State Machine
+class GameStateManager {
+  static changeState(newState, data = {}) {
+    const oldState = currentGameState;
+    currentGameState = newState;
+
+    GameLogger.log("STATE_CHANGE", { from: oldState, to: newState, data });
+
+    this.updateUI();
+    this.handleStateEntry(newState, data);
+  }
+
+  static updateUI() {
+    // Hide all sections
+    document.querySelectorAll(".section").forEach((section) => {
+      section.classList.remove("active");
+    });
+
+    // Show appropriate section based on state
+    let sectionId;
+    switch (currentGameState) {
+      case GAME_STATES.MENU:
+        sectionId = "menu-section";
+        break;
+      case GAME_STATES.LOCAL_SETUP:
+        sectionId = "local-setup-section";
+        break;
+      case GAME_STATES.CREATE_ROOM:
+        sectionId = "create-room-section";
+        break;
+      case GAME_STATES.JOIN_ROOM:
+        sectionId = "join-room-section";
+        break;
+      case GAME_STATES.WAITING_FOR_PLAYERS:
+        sectionId = "create-room-section"; // Show room display
+        break;
+      case GAME_STATES.GAME_READY:
+      case GAME_STATES.ROUND_IN_PROGRESS:
+      case GAME_STATES.ROUND_COMPLETE:
+        sectionId = "game-section";
+        break;
+      case GAME_STATES.SERIES_COMPLETE:
+        sectionId = "game-over-section";
+        break;
+    }
+
+    if (sectionId) {
+      const section = document.getElementById(sectionId);
+      if (section) {
+        section.classList.add("active");
       }
     }
-    
-    if (explanationElement) {
-      explanationElement.textContent = result.explanation;
+  }
+
+  static handleStateEntry(state, data) {
+    switch (state) {
+      case GAME_STATES.WAITING_FOR_PLAYERS:
+        this.showRoomDisplay(data);
+        break;
+      case GAME_STATES.GAME_READY:
+        this.startGame();
+        break;
+      case GAME_STATES.ROUND_IN_PROGRESS:
+        this.startRound();
+        break;
+      case GAME_STATES.ROUND_COMPLETE:
+        this.showRoundResult();
+        break;
+      case GAME_STATES.SERIES_COMPLETE:
+        this.showGameOver();
+        break;
     }
   }
 
-  isGameOver() {
-    if (gameState.maxGames === -1) return false;
-    return gameState.currentGame >= gameState.maxGames;
-  }
+  static handleRoomUpdate(roomData) {
+    gameData = roomData;
 
-  async endGame() {
-    gameState.isGameActive = false;
-    
-    await this.updateLeaderboard();
-    
-    const modal = document.getElementById('game-over-modal');
-    const title = document.getElementById('game-over-title');
-    const finalScore = document.getElementById('final-score');
-    
-    if (!modal || !title || !finalScore) return;
-    
-    const p1Score = gameState.player1.score;
-    const p2Score = gameState.player2.score;
-    
-    if (p1Score > p2Score) {
-      title.textContent = '🎉 You Win!';
-      title.style.color = 'var(--color-success)';
-    } else if (p2Score > p1Score) {
-      title.textContent = `😔 ${gameState.player2.name} Wins!`;
-      title.style.color = 'var(--color-error)';
-    } else {
-      title.textContent = "🤝 It's a Tie!";
-      title.style.color = 'var(--color-warning)';
+    switch (roomData.status) {
+      case "WAITING_FOR_PLAYERS":
+        if (currentGameState !== GAME_STATES.WAITING_FOR_PLAYERS) {
+          this.changeState(GAME_STATES.WAITING_FOR_PLAYERS, roomData);
+        } else {
+          this.updateRoomDisplay(roomData);
+        }
+        break;
+      case "GAME_READY":
+        this.changeState(GAME_STATES.GAME_READY, roomData);
+        break;
+      case "ROUND_IN_PROGRESS":
+        this.changeState(GAME_STATES.ROUND_IN_PROGRESS, roomData);
+        break;
+      case "ROUND_COMPLETE":
+        this.changeState(GAME_STATES.ROUND_COMPLETE, roomData);
+        break;
+      case "SERIES_COMPLETE":
+        this.changeState(GAME_STATES.SERIES_COMPLETE, roomData);
+        break;
     }
-    
-    finalScore.innerHTML = `
-      <div class="final-score-display">
-        <div class="score-row">
-          <span>${gameState.player1.name}: ${p1Score}</span>
-        </div>
-        <div class="score-row">
-          <span>${gameState.player2.name}: ${p2Score}</span>
-        </div>
-      </div>
-    `;
-    
-    modal.classList.remove('hidden');
   }
 
-  async updateLeaderboard() {
-    const playerName = gameState.player1.name;
-    const totalGames = gameState.currentGame;
-    const wins = gameState.player1.score;
-    const losses = gameState.player2.score;
-    const ties = totalGames - wins - losses;
+  static handleRoomDeleted() {
+    alert("The room has been closed by the host.");
+    this.changeState(GAME_STATES.MENU);
+  }
 
-    if (gameState.gameMode === 'online' && gameState.player1.id) {
-      // Save to Firebase leaderboard
-      try {
-        await this.firebaseManager.saveToLeaderboard({
-          id: gameState.player1.id,
-          name: playerName,
-          totalGames,
-          totalWins: wins,
-          totalLosses: losses,
-          totalTies: ties,
-          won: wins > losses,
-          lost: losses > wins
+  static showRoomDisplay(roomData) {
+    const roomDisplay = document.getElementById("room-display");
+    const roomCodeElement = document.getElementById("room-code");
+    const hostNameElement = document.getElementById("host-display-name");
+    const guestSlot = document.getElementById("guest-slot");
+
+    if (roomDisplay) roomDisplay.classList.remove("hidden");
+    if (roomCodeElement) roomCodeElement.textContent = roomData.roomCode;
+    if (hostNameElement && roomData.players) {
+      const host = Object.values(roomData.players).find((p) => p.isHost);
+      if (host) hostNameElement.textContent = host.name;
+    }
+
+    this.updateRoomDisplay(roomData);
+  }
+
+  static updateRoomDisplay(roomData) {
+    const guestSlot = document.getElementById("guest-slot");
+    if (!guestSlot || !roomData.players) return;
+
+    const players = Object.values(roomData.players);
+    const guest = players.find((p) => !p.isHost);
+
+    if (guest) {
+      guestSlot.innerHTML = `
+        <span class="player-icon">👤</span>
+        <span class="player-name">${guest.name}</span>
+        <span class="status-badge ready">Ready</span>
+      `;
+    }
+  }
+
+  static startGame() {
+    if (!gameData) return;
+
+    GameLogger.log("GAME_STARTED", { roomCode: gameData.roomCode });
+
+    // Update game UI
+    const gameModeDisplay = document.getElementById("game-mode-display");
+    const player1Name = document.getElementById("player1-name");
+    const player2Name = document.getElementById("player2-name");
+    const roundInfo = document.getElementById("round-info");
+
+    const players = Object.values(gameData.players);
+    const myPlayer = players.find((p) => p.id === playerId);
+    const opponent = players.find((p) => p.id !== playerId);
+
+    if (gameModeDisplay) gameModeDisplay.textContent = "Online Multiplayer";
+    if (player1Name) player1Name.textContent = myPlayer ? myPlayer.name : "You";
+    if (player2Name)
+      player2Name.textContent = opponent ? opponent.name : "Opponent";
+    if (roundInfo)
+      roundInfo.textContent = `Round ${gameData.game.currentRound} of ${gameData.maxRounds}`;
+
+    this.updateScores();
+    this.changeState(GAME_STATES.ROUND_IN_PROGRESS);
+  }
+
+  static startRound() {
+    GameLogger.log("ROUND_STARTED", { round: gameData?.game?.currentRound });
+
+    // Reset round UI
+    const roundMessage = document.getElementById("round-message");
+    const roundExplanation = document.getElementById("round-explanation");
+    const player1ChoiceIcon = document.getElementById("player1-choice-icon");
+    const player2ChoiceIcon = document.getElementById("player2-choice-icon");
+    const player1ChoiceName = document.getElementById("player1-choice-name");
+    const player2ChoiceName = document.getElementById("player2-choice-name");
+    const choiceGrid = document.getElementById("choice-grid");
+    const waitingState = document.getElementById("waiting-state");
+    const roundActions = document.getElementById("round-actions");
+
+    if (roundMessage) roundMessage.textContent = "Make your choice!";
+    if (roundExplanation) roundExplanation.textContent = "";
+    if (player1ChoiceIcon) player1ChoiceIcon.textContent = "❓";
+    if (player2ChoiceIcon) player2ChoiceIcon.textContent = "❓";
+    if (player1ChoiceName) player1ChoiceName.textContent = "Your Choice";
+    if (player2ChoiceName) player2ChoiceName.textContent = "Opponent Choice";
+    if (choiceGrid) choiceGrid.style.display = "grid";
+    if (waitingState) waitingState.classList.add("hidden");
+    if (roundActions) roundActions.classList.add("hidden");
+
+    // Enable choice buttons
+    document.querySelectorAll(".choice-btn").forEach((btn) => {
+      btn.disabled = false;
+      btn.classList.remove("selected");
+    });
+
+    this.updateRoundInfo();
+  }
+
+  static showRoundResult() {
+    if (!gameData?.game?.lastResult) return;
+
+    const result = gameData.game.lastResult;
+    GameLogger.log("ROUND_RESULT", result);
+
+    // Update UI with choices and result
+    const player1ChoiceIcon = document.getElementById("player1-choice-icon");
+    const player2ChoiceIcon = document.getElementById("player2-choice-icon");
+    const player1ChoiceName = document.getElementById("player1-choice-name");
+    const player2ChoiceName = document.getElementById("player2-choice-name");
+    const roundMessage = document.getElementById("round-message");
+    const roundExplanation = document.getElementById("round-explanation");
+
+    const choice1Data = CHOICES.find((c) => c.id === result.player1Choice);
+    const choice2Data = CHOICES.find((c) => c.id === result.player2Choice);
+
+    if (player1ChoiceIcon && choice1Data) {
+      player1ChoiceIcon.textContent = choice1Data.emoji;
+      player1ChoiceIcon.classList.remove("winner", "loser");
+      if (result.winner === 1) player1ChoiceIcon.classList.add("winner");
+      else if (result.winner === 2) player1ChoiceIcon.classList.add("loser");
+    }
+
+    if (player2ChoiceIcon && choice2Data) {
+      player2ChoiceIcon.textContent = choice2Data.emoji;
+      player2ChoiceIcon.classList.remove("winner", "loser");
+      if (result.winner === 2) player2ChoiceIcon.classList.add("winner");
+      else if (result.winner === 1) player2ChoiceIcon.classList.add("loser");
+    }
+
+    if (player1ChoiceName && choice1Data)
+      player1ChoiceName.textContent = choice1Data.name;
+    if (player2ChoiceName && choice2Data)
+      player2ChoiceName.textContent = choice2Data.name;
+
+    if (roundMessage) {
+      if (result.winner === 1) {
+        roundMessage.textContent = "You Win This Round!";
+        roundMessage.style.color = "var(--color-success)";
+      } else if (result.winner === 2) {
+        roundMessage.textContent = "Opponent Wins This Round!";
+        roundMessage.style.color = "var(--color-error)";
+      } else {
+        roundMessage.textContent = "Round Tied!";
+        roundMessage.style.color = "var(--color-warning)";
+      }
+    }
+
+    if (roundExplanation) roundExplanation.textContent = result.explanation;
+
+    this.updateScores();
+
+    // Show next round button if not series complete
+    const roundActions = document.getElementById("round-actions");
+    if (roundActions && gameData.status !== "SERIES_COMPLETE") {
+      roundActions.classList.remove("hidden");
+    }
+  }
+
+  static showGameOver() {
+    if (!gameData) return;
+
+    GameLogger.log("GAME_OVER", { winner: gameData.game.seriesWinner });
+
+    const gameOverTitle = document.getElementById("game-over-title");
+    const finalScores = document.getElementById("final-scores");
+    const gameSummary = document.getElementById("game-summary");
+
+    const players = Object.values(gameData.players);
+    const myPlayer = players.find((p) => p.id === playerId);
+    const opponent = players.find((p) => p.id !== playerId);
+    const finalRoundWins = gameData.game.finalScores || gameData.game.roundWins;
+
+    const myScore = finalRoundWins[playerId] || 0;
+    const opponentScore = finalRoundWins[opponent?.id] || 0;
+
+    if (gameOverTitle) {
+      if (gameData.game.seriesWinner === playerId) {
+        gameOverTitle.textContent = "🎉 You Win!";
+        gameOverTitle.style.color = "var(--color-success)";
+      } else if (gameData.game.seriesWinner === opponent?.id) {
+        gameOverTitle.textContent = "😔 You Lose!";
+        gameOverTitle.style.color = "var(--color-error)";
+      } else {
+        gameOverTitle.textContent = "🤝 Tie Game!";
+        gameOverTitle.style.color = "var(--color-warning)";
+      }
+    }
+
+    if (finalScores) {
+      finalScores.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <span>${myPlayer?.name || "You"}: <strong>${myScore}</strong></span>
+          <span>${
+            opponent?.name || "Opponent"
+          }: <strong>${opponentScore}</strong></span>
+        </div>
+      `;
+    }
+
+    if (gameSummary) {
+      const totalRounds = gameData.game.currentRound - 1;
+      gameSummary.textContent = `Game completed in ${totalRounds} rounds. Thanks for playing!`;
+    }
+  }
+
+  static updateScores() {
+    if (!gameData) return;
+
+    const player1Score = document.getElementById("player1-score");
+    const player2Score = document.getElementById("player2-score");
+    const roundInfo = document.getElementById("round-info");
+
+    const players = Object.values(gameData.players);
+    const myPlayer = players.find((p) => p.id === playerId);
+    const opponent = players.find((p) => p.id !== playerId);
+
+    const myScore = gameData.game.roundWins[playerId] || 0;
+    const opponentScore = gameData.game.roundWins[opponent?.id] || 0;
+
+    if (player1Score) player1Score.textContent = myScore.toString();
+    if (player2Score) player2Score.textContent = opponentScore.toString();
+    if (roundInfo)
+      roundInfo.textContent = `Round ${gameData.game.currentRound} of ${gameData.maxRounds}`;
+  }
+
+  static updateRoundInfo() {
+    if (!gameData) return;
+
+    const roundInfo = document.getElementById("round-info");
+    if (roundInfo) {
+      roundInfo.textContent = `Round ${gameData.game.currentRound} of ${gameData.maxRounds}`;
+    }
+  }
+}
+
+// Local AI Player
+class AIPlayer {
+  constructor(difficulty = "adaptive") {
+    this.difficulty = difficulty;
+    this.playerHistory = [];
+    this.patternMemory = new Map();
+  }
+
+  makeChoice() {
+    switch (this.difficulty) {
+      case "random":
+        return this.getRandomChoice();
+      case "adaptive":
+        return this.getAdaptiveChoice();
+      case "expert":
+        return this.getExpertChoice();
+      default:
+        return this.getRandomChoice();
+    }
+  }
+
+  recordPlayerChoice(choice) {
+    this.playerHistory.push(choice);
+    if (this.playerHistory.length > 20) {
+      this.playerHistory = this.playerHistory.slice(-20);
+    }
+  }
+
+  getRandomChoice() {
+    const choices = ["rock", "paper", "scissors", "lizard", "spock"];
+    return choices[Math.floor(Math.random() * choices.length)];
+  }
+
+  getAdaptiveChoice() {
+    if (this.playerHistory.length < 3) {
+      return this.getRandomChoice();
+    }
+
+    const recent = this.playerHistory.slice(-3);
+    const predicted = this.predictNextChoice(recent);
+
+    if (predicted && Math.random() < 0.7) {
+      return this.getCounterChoice(predicted);
+    }
+
+    return this.getRandomChoice();
+  }
+
+  getExpertChoice() {
+    if (this.playerHistory.length < 2) {
+      return this.getRandomChoice();
+    }
+
+    // Advanced pattern recognition
+    const patterns = this.findPatterns();
+    if (patterns.length > 0 && Math.random() < 0.8) {
+      const bestPattern = patterns[0];
+      return this.getCounterChoice(bestPattern.nextChoice);
+    }
+
+    // Fallback to adaptive
+    return this.getAdaptiveChoice();
+  }
+
+  predictNextChoice(recent) {
+    const counts = {};
+    recent.forEach((choice) => {
+      counts[choice] = (counts[choice] || 0) + 1;
+    });
+
+    return Object.keys(counts).reduce((a, b) =>
+      counts[a] > counts[b] ? a : b
+    );
+  }
+
+  findPatterns() {
+    const patterns = [];
+    const history = this.playerHistory;
+
+    for (let len = 2; len <= Math.min(4, history.length - 1); len++) {
+      for (let i = 0; i <= history.length - len - 1; i++) {
+        const pattern = history.slice(i, i + len);
+        const nextChoice = history[i + len];
+
+        const key = pattern.join(",");
+        if (!this.patternMemory.has(key)) {
+          this.patternMemory.set(key, []);
+        }
+        this.patternMemory.get(key).push(nextChoice);
+      }
+    }
+
+    // Find current pattern matches
+    for (let len = Math.min(4, history.length); len >= 2; len--) {
+      const currentPattern = history.slice(-len).join(",");
+      if (this.patternMemory.has(currentPattern)) {
+        const occurrences = this.patternMemory.get(currentPattern);
+        const prediction = this.getMostCommon(occurrences);
+        patterns.push({
+          pattern: currentPattern,
+          nextChoice: prediction,
+          confidence: len,
         });
-      } catch (error) {
-        console.error('Failed to save to leaderboard:', error);
-      }
-    } else {
-      // Local storage for local games
-      let playerEntry = gameState.leaderboard.find(p => p.name === playerName);
-      
-      if (!playerEntry) {
-        playerEntry = {
-          name: playerName,
-          totalGames: 0,
-          totalWins: 0,
-          totalLosses: 0,
-          totalTies: 0,
-          winStreak: 0,
-          maxWinStreak: 0
-        };
-        gameState.leaderboard.push(playerEntry);
-      }
-
-      playerEntry.totalGames += totalGames;
-      playerEntry.totalWins += wins;
-      playerEntry.totalLosses += losses;
-      playerEntry.totalTies += ties;
-
-      const finalResult = wins > losses ? 'win' : losses > wins ? 'loss' : 'tie';
-      if (finalResult === 'win') {
-        playerEntry.winStreak++;
-        playerEntry.maxWinStreak = Math.max(playerEntry.maxWinStreak, playerEntry.winStreak);
-      } else if (finalResult === 'loss') {
-        playerEntry.winStreak = 0;
       }
     }
 
-    if (window.leaderboardManager) {
-      window.leaderboardManager.updateDisplay();
+    return patterns.sort((a, b) => b.confidence - a.confidence);
+  }
+
+  getMostCommon(arr) {
+    const counts = {};
+    arr.forEach((item) => (counts[item] = (counts[item] || 0) + 1));
+    return Object.keys(counts).reduce((a, b) =>
+      counts[a] > counts[b] ? a : b
+    );
+  }
+
+  getCounterChoice(choice) {
+    const counters = [];
+
+    // Find all choices that beat the predicted choice
+    Object.keys(GAME_RULES).forEach((key) => {
+      if (GAME_RULES[key].beats.includes(choice)) {
+        counters.push(key);
+      }
+    });
+
+    return counters.length > 0
+      ? counters[Math.floor(Math.random() * counters.length)]
+      : this.getRandomChoice();
+  }
+}
+
+// Local Game Manager - FIXED VERSION
+class LocalGameManager {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.playerName = "Player";
+    this.maxRounds = 3;
+    this.currentRound = 1;
+    this.playerScore = 0;
+    this.aiScore = 0;
+    this.ai = null;
+    this.playerChoice = null;
+    this.aiChoice = null;
+    this.gameActive = false;
+    this.isWaitingForAI = false;
+  }
+
+  startGame(playerName, maxRounds, difficulty) {
+    this.reset();
+    this.playerName = playerName;
+    this.maxRounds = parseInt(maxRounds);
+    this.ai = new AIPlayer(difficulty);
+    this.gameActive = true;
+
+    GameLogger.log("LOCAL_GAME_STARTED", { playerName, maxRounds, difficulty });
+
+    // Update UI
+    const gameModeDisplay = document.getElementById("game-mode-display");
+    const player1Name = document.getElementById("player1-name");
+    const player2Name = document.getElementById("player2-name");
+
+    if (gameModeDisplay)
+      gameModeDisplay.textContent = `Local Game (${difficulty})`;
+    if (player1Name) player1Name.textContent = playerName;
+    if (player2Name) player2Name.textContent = "AI";
+
+    // Start in round in progress state
+    GameStateManager.changeState(GAME_STATES.ROUND_IN_PROGRESS);
+    this.startRound();
+  }
+
+  startRound() {
+    if (!this.gameActive) return;
+
+    this.playerChoice = null;
+    this.aiChoice = null;
+    this.isWaitingForAI = false;
+
+    GameLogger.log("LOCAL_ROUND_STARTED", { round: this.currentRound });
+
+    // Update UI
+    const roundMessage = document.getElementById("round-message");
+    const roundExplanation = document.getElementById("round-explanation");
+    const roundInfo = document.getElementById("round-info");
+    const player1ChoiceIcon = document.getElementById("player1-choice-icon");
+    const player2ChoiceIcon = document.getElementById("player2-choice-icon");
+    const player1ChoiceName = document.getElementById("player1-choice-name");
+    const player2ChoiceName = document.getElementById("player2-choice-name");
+    const choiceGrid = document.getElementById("choice-grid");
+    const waitingState = document.getElementById("waiting-state");
+    const roundActions = document.getElementById("round-actions");
+
+    if (roundMessage) {
+      roundMessage.textContent = "Make your choice!";
+      roundMessage.style.color = "var(--color-text)";
+    }
+    if (roundExplanation) roundExplanation.textContent = "";
+    if (roundInfo)
+      roundInfo.textContent = `Round ${this.currentRound} of ${this.maxRounds}`;
+    if (player1ChoiceIcon) {
+      player1ChoiceIcon.textContent = "❓";
+      player1ChoiceIcon.classList.remove("winner", "loser");
+    }
+    if (player2ChoiceIcon) {
+      player2ChoiceIcon.textContent = "❓";
+      player2ChoiceIcon.classList.remove("winner", "loser");
+    }
+    if (player1ChoiceName) player1ChoiceName.textContent = "Your Choice";
+    if (player2ChoiceName) player2ChoiceName.textContent = "AI Choice";
+    if (choiceGrid) choiceGrid.style.display = "grid";
+    if (waitingState) waitingState.classList.add("hidden");
+    if (roundActions) roundActions.classList.add("hidden");
+
+    // Enable choice buttons
+    document.querySelectorAll(".choice-btn").forEach((btn) => {
+      btn.disabled = false;
+      btn.classList.remove("selected");
+    });
+
+    this.updateScores();
+  }
+
+  makeChoice(choice) {
+    if (!this.gameActive || this.playerChoice || this.isWaitingForAI) {
+      GameLogger.log("LOCAL_CHOICE_REJECTED", {
+        gameActive: this.gameActive,
+        playerChoice: this.playerChoice,
+        isWaitingForAI: this.isWaitingForAI,
+      });
+      return;
+    }
+
+    this.playerChoice = choice;
+    this.isWaitingForAI = true;
+    this.ai.recordPlayerChoice(choice);
+
+    GameLogger.log("LOCAL_PLAYER_CHOICE", { choice });
+
+    // Update UI immediately with player's choice
+    const choiceData = CHOICES.find((c) => c.id === choice);
+    const player1ChoiceIcon = document.getElementById("player1-choice-icon");
+    const player1ChoiceName = document.getElementById("player1-choice-name");
+    const choiceGrid = document.getElementById("choice-grid");
+    const waitingState = document.getElementById("waiting-state");
+    const waitingMessage = document.getElementById("waiting-message");
+
+    if (player1ChoiceIcon && choiceData)
+      player1ChoiceIcon.textContent = choiceData.emoji;
+    if (player1ChoiceName && choiceData)
+      player1ChoiceName.textContent = choiceData.name;
+    if (choiceGrid) choiceGrid.style.display = "none";
+    if (waitingState) waitingState.classList.remove("hidden");
+    if (waitingMessage) waitingMessage.textContent = "AI is thinking...";
+
+    // Disable and highlight choice buttons
+    document.querySelectorAll(".choice-btn").forEach((btn) => {
+      btn.disabled = true;
+      if (btn.dataset.choice === choice) {
+        btn.classList.add("selected");
+      }
+    });
+
+    // AI makes choice after realistic delay
+    setTimeout(() => {
+      if (this.gameActive && this.isWaitingForAI) {
+        this.aiChoice = this.ai.makeChoice();
+        GameLogger.log("LOCAL_AI_CHOICE", { choice: this.aiChoice });
+        this.resolveRound();
+      }
+    }, 800 + Math.random() * 1200); // 0.8-2.0 seconds
+  }
+
+  resolveRound() {
+    if (!this.playerChoice || !this.aiChoice || !this.gameActive) {
+      GameLogger.log("LOCAL_RESOLVE_FAILED", {
+        playerChoice: this.playerChoice,
+        aiChoice: this.aiChoice,
+        gameActive: this.gameActive,
+      });
+      return;
+    }
+
+    this.isWaitingForAI = false;
+
+    const result = FirebaseManager.calculateWinner(
+      this.playerChoice,
+      this.aiChoice
+    );
+
+    GameLogger.log("LOCAL_ROUND_RESOLVED", {
+      playerChoice: this.playerChoice,
+      aiChoice: this.aiChoice,
+      result,
+    });
+
+    // Update scores
+    if (result.winner === 1) {
+      this.playerScore++;
+    } else if (result.winner === 2) {
+      this.aiScore++;
+    }
+
+    // Update UI with AI choice and results
+    const aiChoiceData = CHOICES.find((c) => c.id === this.aiChoice);
+    const player2ChoiceIcon = document.getElementById("player2-choice-icon");
+    const player2ChoiceName = document.getElementById("player2-choice-name");
+    const roundMessage = document.getElementById("round-message");
+    const roundExplanation = document.getElementById("round-explanation");
+    const waitingState = document.getElementById("waiting-state");
+    const player1ChoiceIcon = document.getElementById("player1-choice-icon");
+
+    // Hide waiting state
+    if (waitingState) waitingState.classList.add("hidden");
+
+    // Show AI choice
+    if (player2ChoiceIcon && aiChoiceData) {
+      player2ChoiceIcon.textContent = aiChoiceData.emoji;
+      player2ChoiceIcon.classList.remove("winner", "loser");
+      if (result.winner === 2) player2ChoiceIcon.classList.add("winner");
+      else if (result.winner === 1) player2ChoiceIcon.classList.add("loser");
+    }
+    if (player2ChoiceName && aiChoiceData)
+      player2ChoiceName.textContent = aiChoiceData.name;
+
+    // Update player choice icon status
+    if (player1ChoiceIcon) {
+      player1ChoiceIcon.classList.remove("winner", "loser");
+      if (result.winner === 1) player1ChoiceIcon.classList.add("winner");
+      else if (result.winner === 2) player1ChoiceIcon.classList.add("loser");
+    }
+
+    // Show result message
+    if (roundMessage) {
+      if (result.winner === 1) {
+        roundMessage.textContent = "You Win This Round!";
+        roundMessage.style.color = "var(--color-success)";
+      } else if (result.winner === 2) {
+        roundMessage.textContent = "AI Wins This Round!";
+        roundMessage.style.color = "var(--color-error)";
+      } else {
+        roundMessage.textContent = "Round Tied!";
+        roundMessage.style.color = "var(--color-warning)";
+      }
+    }
+
+    if (roundExplanation) roundExplanation.textContent = result.explanation;
+
+    this.updateScores();
+
+    // Change to round complete state
+    GameStateManager.changeState(GAME_STATES.ROUND_COMPLETE);
+
+    // Check if game is over
+    const requiredWins = Math.ceil(this.maxRounds / 2);
+    if (this.playerScore >= requiredWins || this.aiScore >= requiredWins) {
+      setTimeout(() => this.endGame(), 2000);
+    } else if (this.currentRound >= this.maxRounds) {
+      // Max rounds reached, determine winner by score
+      setTimeout(() => this.endGame(), 2000);
+    } else {
+      // Show next round button
+      setTimeout(() => {
+        const roundActions = document.getElementById("round-actions");
+        if (roundActions) roundActions.classList.remove("hidden");
+      }, 1500);
     }
   }
 
   nextRound() {
-    this.resetRound();
+    this.currentRound++;
+    GameStateManager.changeState(GAME_STATES.ROUND_IN_PROGRESS);
+    this.startRound();
   }
 
-  playAgain() {
-    const modal = document.getElementById('game-over-modal');
-    if (modal) modal.classList.add('hidden');
-    this.initializeGame();
-  }
+  endGame() {
+    this.gameActive = false;
 
-  quitGame() {
-    const modal = document.getElementById('game-over-modal');
-    if (modal) modal.classList.add('hidden');
-    
-    if (gameState.gameMode === 'online' && gameState.currentRoomCode) {
-      this.firebaseManager.handlePlayerDisconnection(
-        gameState.currentRoomCode,
-        gameState.player1.id
-      );
-      this.firebaseManager.cleanup();
+    GameLogger.log("LOCAL_GAME_ENDED", {
+      playerScore: this.playerScore,
+      aiScore: this.aiScore,
+      rounds: this.currentRound - 1,
+    });
+
+    // Update game over UI
+    const gameOverTitle = document.getElementById("game-over-title");
+    const finalScores = document.getElementById("final-scores");
+    const gameSummary = document.getElementById("game-summary");
+
+    if (gameOverTitle) {
+      if (this.playerScore > this.aiScore) {
+        gameOverTitle.textContent = "🎉 You Win!";
+        gameOverTitle.style.color = "var(--color-success)";
+      } else if (this.aiScore > this.playerScore) {
+        gameOverTitle.textContent = "😔 AI Wins!";
+        gameOverTitle.style.color = "var(--color-error)";
+      } else {
+        gameOverTitle.textContent = "🤝 Tie Game!";
+        gameOverTitle.style.color = "var(--color-warning)";
+      }
     }
-    
-    gameState.isGameActive = false;
-    gameState.currentRoomCode = null;
-    gameState.gameMode = 'local';
-    
-    window.navigationManager.navigateTo('main-menu');
+
+    if (finalScores) {
+      finalScores.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <span>${this.playerName}: <strong>${this.playerScore}</strong></span>
+          <span>AI: <strong>${this.aiScore}</strong></span>
+        </div>
+      `;
+    }
+
+    if (gameSummary) {
+      const totalRounds = this.currentRound;
+      gameSummary.textContent = `Game completed in ${totalRounds} rounds. Thanks for playing!`;
+    }
+
+    GameStateManager.changeState(GAME_STATES.SERIES_COMPLETE);
   }
 
-  showStatus(element, message, type) {
-    if (!element) return;
-    
-    element.textContent = message;
-    element.className = `status-message ${type}`;
-    element.classList.remove('hidden');
-    
-    setTimeout(() => {
-      element.classList.add('hidden');
-    }, 5000);
+  updateScores() {
+    const player1Score = document.getElementById("player1-score");
+    const player2Score = document.getElementById("player2-score");
+
+    if (player1Score) player1Score.textContent = this.playerScore.toString();
+    if (player2Score) player2Score.textContent = this.aiScore.toString();
   }
 }
 
-// Feedback System
-class FeedbackManager {
-  constructor() {
-    this.currentRating = 5;
-    this.initializeEventListeners();
-  }
-
-  initializeEventListeners() {
-    setTimeout(() => {
-      this.setupEventListeners();
-    }, 100);
-  }
-
-  setupEventListeners() {
-    document.querySelectorAll('.star').forEach(star => {
-      star.addEventListener('click', (e) => this.setRating(parseInt(e.target.dataset.rating)));
-    });
-
-    const feedbackForm = document.getElementById('feedback-form');
-    if (feedbackForm) {
-      feedbackForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        this.submitFeedback();
+// Event Handlers
+class EventHandlers {
+  static init() {
+    // Debug toggle
+    const debugToggle = document.getElementById("debug-toggle");
+    if (debugToggle) {
+      debugToggle.addEventListener("click", () => {
+        const debugPanel = document.getElementById("debug-panel");
+        if (debugPanel) {
+          debugPanel.classList.toggle("active");
+        }
       });
     }
-  }
 
-  setRating(rating) {
-    this.currentRating = rating;
-    
-    document.querySelectorAll('.star').forEach((star, index) => {
-      if (index < rating) {
-        star.classList.add('active');
+    // Main menu buttons
+    document.getElementById("local-game-btn")?.addEventListener("click", () => {
+      GameStateManager.changeState(GAME_STATES.LOCAL_SETUP);
+    });
+
+    document
+      .getElementById("create-room-btn")
+      ?.addEventListener("click", () => {
+        if (firebaseAvailable) {
+          GameStateManager.changeState(GAME_STATES.CREATE_ROOM);
+        } else {
+          alert(
+            "Firebase is not configured. Please set up Firebase for online multiplayer."
+          );
+        }
+      });
+
+    document.getElementById("join-room-btn")?.addEventListener("click", () => {
+      if (firebaseAvailable) {
+        GameStateManager.changeState(GAME_STATES.JOIN_ROOM);
       } else {
-        star.classList.remove('active');
+        alert(
+          "Firebase is not configured. Please set up Firebase for online multiplayer."
+        );
       }
     });
-    
-    const ratingTexts = ['Terrible', 'Poor', 'Fair', 'Good', 'Excellent'];
-    const ratingTextEl = document.querySelector('.rating-text');
-    if (ratingTextEl) {
-      ratingTextEl.textContent = 
-        `Click to rate (${rating} star${rating !== 1 ? 's' : ''} - ${ratingTexts[rating - 1]})`;
-    }
+
+    // Local mode button from Firebase notice
+    document.getElementById("local-mode-btn")?.addEventListener("click", () => {
+      const notice = document.getElementById("firebase-notice");
+      if (notice) notice.classList.add("hidden");
+    });
+
+    // Back buttons
+    document.getElementById("back-to-menu")?.addEventListener("click", () => {
+      GameStateManager.changeState(GAME_STATES.MENU);
+    });
+
+    document.getElementById("back-to-menu-2")?.addEventListener("click", () => {
+      GameStateManager.changeState(GAME_STATES.MENU);
+    });
+
+    document.getElementById("back-to-menu-3")?.addEventListener("click", () => {
+      GameStateManager.changeState(GAME_STATES.MENU);
+    });
+
+    // Local game setup
+    document
+      .getElementById("start-local-game")
+      ?.addEventListener("click", () => {
+        this.startLocalGame();
+      });
+
+    // Online room creation
+    document.getElementById("create-room")?.addEventListener("click", () => {
+      this.createRoom();
+    });
+
+    document.getElementById("copy-room-code")?.addEventListener("click", () => {
+      this.copyRoomCode();
+    });
+
+    document.getElementById("cancel-room")?.addEventListener("click", () => {
+      this.cancelRoom();
+    });
+
+    // Join room
+    document.getElementById("join-room")?.addEventListener("click", () => {
+      this.joinRoom();
+    });
+
+    // Choice buttons
+    document.querySelectorAll(".choice-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const choice = btn.dataset.choice;
+        if (choice) {
+          this.makeChoice(choice);
+        }
+      });
+    });
+
+    // Game controls
+    document.getElementById("quit-game")?.addEventListener("click", () => {
+      this.quitGame();
+    });
+
+    document.getElementById("next-round-btn")?.addEventListener("click", () => {
+      this.nextRound();
+    });
+
+    // Game over buttons
+    document.getElementById("play-again-btn")?.addEventListener("click", () => {
+      this.playAgain();
+    });
+
+    document.getElementById("return-to-menu")?.addEventListener("click", () => {
+      GameStateManager.changeState(GAME_STATES.MENU);
+    });
   }
 
-  async submitFeedback() {
-    const nameEl = document.getElementById('feedback-name');
-    const emailEl = document.getElementById('feedback-email');
-    const messageEl = document.getElementById('feedback-message');
+  static startLocalGame() {
+    const playerName =
+      document.getElementById("player-name")?.value || "Player";
+    const rounds = document.getElementById("rounds-select")?.value || "3";
+    const difficulty =
+      document.getElementById("difficulty-select")?.value || "adaptive";
 
-    const name = nameEl ? nameEl.value : '';
-    const email = emailEl ? emailEl.value : '';
-    const message = messageEl ? messageEl.value : '';
+    localGameManager.startGame(playerName, rounds, difficulty);
+  }
 
-    if (!message.trim()) {
-      alert('Please enter your feedback message.');
-      return;
+  static async createRoom() {
+    const hostName = document.getElementById("host-name")?.value || "Host";
+    const rounds = document.getElementById("room-rounds")?.value || "3";
+    const createBtn = document.getElementById("create-room");
+
+    if (createBtn) {
+      createBtn.classList.add("loading");
     }
 
     try {
-      if (database) {
-        await database.ref('feedback').push({
-          name: name || 'Anonymous',
-          email,
-          rating: this.currentRating,
-          message,
-          timestamp: Date.now()
-        });
-      }
+      const result = await FirebaseManager.createRoom(hostName, rounds);
+      gameData = { roomCode: result.roomCode, maxRounds: parseInt(rounds) };
+
+      FirebaseManager.setupRoomListener(result.roomCode);
+      GameStateManager.changeState(GAME_STATES.WAITING_FOR_PLAYERS, gameData);
     } catch (error) {
-      console.error('Failed to save feedback:', error);
+      alert("Failed to create room: " + error.message);
+      GameLogger.log("CREATE_ROOM_ERROR", { error: error.message });
+    } finally {
+      if (createBtn) {
+        createBtn.classList.remove("loading");
+      }
     }
-
-    const formEl = document.getElementById('feedback-form');
-    const successEl = document.getElementById('feedback-success');
-    
-    if (formEl) formEl.classList.add('hidden');
-    if (successEl) successEl.classList.remove('hidden');
-
-    setTimeout(() => {
-      this.resetForm();
-    }, 3000);
   }
 
-  resetForm() {
-    const formEl = document.getElementById('feedback-form');
-    const successEl = document.getElementById('feedback-success');
-    
-    if (formEl) {
-      formEl.reset();
-      formEl.classList.remove('hidden');
-    }
-    if (successEl) successEl.classList.add('hidden');
-    
-    this.setRating(5);
-  }
-}
+  static copyRoomCode() {
+    const roomCodeElement = document.getElementById("room-code");
+    if (roomCodeElement && roomCodeElement.textContent) {
+      navigator.clipboard
+        .writeText(roomCodeElement.textContent)
+        .then(() => {
+          const btn = document.getElementById("copy-room-code");
+          if (btn) {
+            const originalText = btn.textContent;
+            btn.textContent = "Copied!";
+            setTimeout(() => {
+              btn.textContent = originalText;
+            }, 2000);
+          }
+        })
+        .catch(() => {
+          // Fallback for older browsers
+          const textArea = document.createElement("textarea");
+          textArea.value = roomCodeElement.textContent;
+          document.body.appendChild(textArea);
+          textArea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textArea);
 
-// Leaderboard Manager
-class LeaderboardManager {
-  constructor() {
-    this.initializeEventListeners();
-    this.loadData();
-  }
-
-  initializeEventListeners() {
-    setTimeout(() => {
-      const sortBy = document.getElementById('sort-by');
-      if (sortBy) {
-        sortBy.addEventListener('change', () => {
-          this.updateDisplay();
+          const btn = document.getElementById("copy-room-code");
+          if (btn) {
+            const originalText = btn.textContent;
+            btn.textContent = "Copied!";
+            setTimeout(() => {
+              btn.textContent = originalText;
+            }, 2000);
+          }
         });
-      }
-    }, 100);
-  }
-
-  async loadData() {
-    if (database && window.gameEngine) {
-      try {
-        const firebaseData = await window.gameEngine.firebaseManager?.loadLeaderboard() || [];
-        gameState.leaderboard = [...gameState.leaderboard, ...firebaseData];
-        this.updateDisplay();
-      } catch (error) {
-        console.error('Failed to load leaderboard:', error);
-        this.updateDisplay();
-      }
-    } else {
-      this.updateDisplay();
     }
   }
 
-  updateDisplay() {
-    const sortByEl = document.getElementById('sort-by');
-    const tbody = document.getElementById('leaderboard-body');
-    
-    if (!tbody) return;
-    
-    const sortBy = sortByEl ? sortByEl.value : 'winPercentage';
-    
-    if (gameState.leaderboard.length === 0) {
-      tbody.innerHTML = '<div class="empty-state"><p>No games played yet. Start playing to see statistics!</p></div>';
+  static async cancelRoom() {
+    if (gameData?.roomCode) {
+      await FirebaseManager.leaveRoom(gameData.roomCode);
+    }
+    gameData = null;
+    GameStateManager.changeState(GAME_STATES.MENU);
+  }
+
+  static async joinRoom() {
+    const guestName = document.getElementById("guest-name")?.value || "Guest";
+    const roomCode = document
+      .getElementById("room-code-input")
+      ?.value?.toUpperCase();
+    const joinBtn = document.getElementById("join-room");
+    const errorElement = document.getElementById("join-error");
+
+    if (!roomCode || roomCode.length !== 6) {
+      this.showError(
+        errorElement,
+        "Please enter a valid 6-character room code"
+      );
       return;
     }
 
-    const sorted = [...gameState.leaderboard].sort((a, b) => {
-      switch (sortBy) {
-        case 'winPercentage':
-          const aPercent = a.totalGames > 0 ? (a.totalWins / a.totalGames) * 100 : 0;
-          const bPercent = b.totalGames > 0 ? (b.totalWins / b.totalGames) * 100 : 0;
-          return bPercent - aPercent;
-        case 'totalWins':
-          return b.totalWins - a.totalWins;
-        case 'totalGames':
-          return b.totalGames - a.totalGames;
-        case 'winStreak':
-          return b.winStreak - a.winStreak;
-        default:
-          return 0;
+    if (joinBtn) {
+      joinBtn.classList.add("loading");
+    }
+
+    try {
+      await FirebaseManager.joinRoom(roomCode, guestName);
+
+      FirebaseManager.setupRoomListener(roomCode);
+      GameStateManager.changeState(GAME_STATES.WAITING_FOR_PLAYERS);
+    } catch (error) {
+      this.showError(errorElement, "Failed to join room: " + error.message);
+      GameLogger.log("JOIN_ROOM_ERROR", { roomCode, error: error.message });
+    } finally {
+      if (joinBtn) {
+        joinBtn.classList.remove("loading");
       }
-    });
+    }
+  }
 
-    let html = '';
-    sorted.forEach((player, index) => {
-      const winPercentage = player.totalGames > 0 
-        ? Math.round((player.totalWins / player.totalGames) * 100)
-        : 0;
-      
-      const rankClass = index < 3 ? `rank-${index + 1}` : '';
-      
-      html += `
-        <div class="table-row">
-          <div class="table-cell ${rankClass}">${index + 1}</div>
-          <div class="table-cell">${player.name}</div>
-          <div class="table-cell">${winPercentage}%</div>
-          <div class="table-cell">${player.totalWins}/${player.totalLosses}/${player.totalTies}</div>
-          <div class="table-cell">${player.winStreak}</div>
-        </div>
-      `;
-    });
+  static showError(element, message) {
+    if (element) {
+      element.textContent = message;
+      element.classList.remove("hidden");
+      element.classList.add("error");
 
-    tbody.innerHTML = html;
+      setTimeout(() => {
+        element.classList.add("hidden");
+      }, 5000);
+    }
+  }
+
+  static async makeChoice(choice) {
+    if (currentGameState === GAME_STATES.ROUND_IN_PROGRESS) {
+      if (gameData?.roomCode) {
+        // Online game
+        try {
+          await FirebaseManager.submitChoice(
+            gameData.roomCode,
+            playerId,
+            choice
+          );
+
+          // Show waiting state
+          const choiceGrid = document.getElementById("choice-grid");
+          const waitingState = document.getElementById("waiting-state");
+          const waitingMessage = document.getElementById("waiting-message");
+
+          if (choiceGrid) choiceGrid.style.display = "none";
+          if (waitingState) waitingState.classList.remove("hidden");
+          if (waitingMessage)
+            waitingMessage.textContent = "Waiting for opponent...";
+
+          // Update UI with player's choice
+          const choiceData = CHOICES.find((c) => c.id === choice);
+          const player1ChoiceIcon = document.getElementById(
+            "player1-choice-icon"
+          );
+          const player1ChoiceName = document.getElementById(
+            "player1-choice-name"
+          );
+
+          if (player1ChoiceIcon && choiceData)
+            player1ChoiceIcon.textContent = choiceData.emoji;
+          if (player1ChoiceName && choiceData)
+            player1ChoiceName.textContent = choiceData.name;
+        } catch (error) {
+          alert("Failed to submit choice: " + error.message);
+          GameLogger.log("SUBMIT_CHOICE_ERROR", {
+            choice,
+            error: error.message,
+          });
+        }
+      } else {
+        // Local game
+        localGameManager.makeChoice(choice);
+      }
+    }
+  }
+
+  static async quitGame() {
+    if (gameData?.roomCode) {
+      await FirebaseManager.leaveRoom(gameData.roomCode);
+    }
+
+    gameData = null;
+    localGameManager.reset();
+    GameStateManager.changeState(GAME_STATES.MENU);
+  }
+
+  static nextRound() {
+    if (gameData?.roomCode) {
+      // Online game - rounds are handled automatically by Firebase
+      const roundActions = document.getElementById("round-actions");
+      if (roundActions) roundActions.classList.add("hidden");
+    } else {
+      // Local game
+      localGameManager.nextRound();
+    }
+  }
+
+  static playAgain() {
+    if (gameData?.roomCode) {
+      alert(
+        "Play again functionality for online games requires both players to agree. Returning to main menu."
+      );
+      GameStateManager.changeState(GAME_STATES.MENU);
+    } else {
+      // Restart local game with same settings
+      const playerName = localGameManager.playerName;
+      const maxRounds = localGameManager.maxRounds;
+      const difficulty = localGameManager.ai?.difficulty || "adaptive";
+
+      localGameManager.startGame(playerName, maxRounds, difficulty);
+    }
   }
 }
 
-// Initialize Application
-let navigationManager;
-let gameEngine;
-let feedbackManager;
-let leaderboardManager;
+// Global Instances
+let connectionManager;
+let localGameManager;
 
-document.addEventListener('DOMContentLoaded', () => {
-  console.log('DOM loaded, initializing app...');
-  
-  navigationManager = new NavigationManager();
-  gameEngine = new GameEngine();
-  feedbackManager = new FeedbackManager();
-  leaderboardManager = new LeaderboardManager();
-  
-  // Make instances globally available
-  window.navigationManager = navigationManager;
-  window.gameEngine = gameEngine;
-  window.feedbackManager = feedbackManager;
-  window.leaderboardManager = leaderboardManager;
-  
-  // Initialize with some sample leaderboard data for local games
-  gameState.leaderboard = [
-    { name: 'AI Master', totalGames: 100, totalWins: 75, totalLosses: 20, totalTies: 5, winStreak: 5, maxWinStreak: 12 },
-    { name: 'Rock Star', totalGames: 50, totalWins: 30, totalLosses: 15, totalTies: 5, winStreak: 2, maxWinStreak: 8 },
-    { name: 'Paper Trail', totalGames: 25, totalWins: 15, totalLosses: 8, totalTies: 2, winStreak: 0, maxWinStreak: 4 }
-  ];
-  
-  console.log('App initialized successfully');
+// Initialize Application
+document.addEventListener("DOMContentLoaded", async () => {
+  GameLogger.log("APP_INIT_START");
+
+  try {
+    // Initialize managers
+    connectionManager = new ConnectionManager();
+    localGameManager = new LocalGameManager();
+
+    // Initialize event handlers
+    EventHandlers.init();
+
+    // Initialize Firebase connection
+    const firebaseInitialized = await connectionManager.initialize();
+
+    // Start in menu state
+    GameStateManager.changeState(GAME_STATES.MENU);
+
+    GameLogger.log("APP_INIT_COMPLETE", { firebaseAvailable });
+  } catch (error) {
+    GameLogger.log("APP_INIT_ERROR", { error: error.message });
+    console.error("Failed to initialize application:", error);
+  }
 });
+
+// Global error handler
+window.addEventListener("error", (event) => {
+  GameLogger.log("GLOBAL_ERROR", {
+    message: event.message,
+    filename: event.filename,
+    lineno: event.lineno,
+  });
+});
+
+// Export for debugging
+window.gameDebug = {
+  logs: () => GameLogger.getRecentLogs(20),
+  state: () => currentGameState,
+  data: () => gameData,
+  firebase: () => firebaseAvailable,
+};

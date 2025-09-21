@@ -3,181 +3,266 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rock Paper Scissors Lizard Spock</title>
+    <title>Rock Paper Scissors Lizard Spock - Bulletproof Multiplayer</title>
     <link rel="stylesheet" href="style.css">
+    
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-database-compat.js"></script>
 </head>
 <body>
-    <div class="app">
+    <div class="app" id="app">
+        <!-- Header -->
         <header class="header">
             <div class="container">
                 <h1 class="game-title">🗿📄✂️🦎🖖 Rock Paper Scissors Lizard Spock</h1>
-                <nav class="nav" id="main-nav">
-                    <button class="btn btn--outline nav-btn" data-section="main-menu">Main Menu</button>
-                </nav>
+                
+                <!-- Connection Status -->
+                <div class="connection-status">
+                    <div class="status-indicator" id="connection-status">
+                        <span class="status-dot" id="status-dot"></span>
+                        <span class="status-text" id="status-text">Initializing...</span>
+                    </div>
+                </div>
+                
+                <!-- Debug Panel (hidden by default) -->
+                <div class="debug-panel hidden" id="debug-panel">
+                    <button class="debug-toggle" id="debug-toggle">🐛 Debug</button>
+                    <div class="debug-content" id="debug-content">
+                        <div class="debug-section">
+                            <strong>Game State:</strong> <span id="debug-state">MENU</span>
+                        </div>
+                        <div class="debug-section">
+                            <strong>Room:</strong> <span id="debug-room">None</span>
+                        </div>
+                        <div class="debug-section">
+                            <strong>Players:</strong> <span id="debug-players">0</span>
+                        </div>
+                        <div class="debug-section">
+                            <strong>Round:</strong> <span id="debug-round">0/0</span>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
 
+        <!-- Main Content -->
         <main class="main">
             <div class="container">
+                <!-- Firebase Configuration Notice -->
+                <div class="config-notice hidden" id="firebase-notice">
+                    <h3>⚠️ Firebase Configuration Required</h3>
+                    <p>To use online multiplayer features, you need to configure Firebase. The app is currently running in local mode only.</p>
+                    <button class="btn btn--outline" id="local-mode-btn">Continue in Local Mode</button>
+                </div>
+
                 <!-- Main Menu Section -->
-                <section id="main-menu" class="section active">
+                <section class="section active" id="menu-section">
+                    <h2>Game Mode</h2>
+                    
                     <div class="menu-grid">
-                        <button class="menu-card" data-section="create-game">
+                        <button class="menu-card" id="local-game-btn">
+                            <div class="menu-card__icon">🤖</div>
+                            <h3>Local Game</h3>
+                            <p>Play against AI opponent</p>
+                            <div class="feature-list">
+                                <span class="feature">✓ Instant start</span>
+                                <span class="feature">✓ Multiple difficulties</span>
+                                <span class="feature">✓ No network required</span>
+                            </div>
+                        </button>
+                        
+                        <button class="menu-card" id="create-room-btn">
                             <div class="menu-card__icon">🎮</div>
-                            <h3>Create Game</h3>
-                            <p>Start a new game vs Computer or Online</p>
+                            <h3>Create Room</h3>
+                            <p>Start online multiplayer game</p>
+                            <div class="feature-list">
+                                <span class="feature" id="create-status">⏳ Checking connection...</span>
+                            </div>
                         </button>
                         
-                        <button class="menu-card" data-section="join-game">
+                        <button class="menu-card" id="join-room-btn">
                             <div class="menu-card__icon">🌐</div>
-                            <h3>Join Game</h3>
-                            <p>Join an existing online game</p>
-                        </button>
-                        
-                        <button class="menu-card" data-section="rules">
-                            <div class="menu-card__icon">📖</div>
-                            <h3>Rules</h3>
-                            <p>Learn how to play the game</p>
-                        </button>
-                        
-                        <button class="menu-card" data-section="feedback">
-                            <div class="menu-card__icon">💭</div>
-                            <h3>Feedback</h3>
-                            <p>Share your thoughts about the game</p>
-                        </button>
-                        
-                        <button class="menu-card" data-section="leaderboard">
-                            <div class="menu-card__icon">🏆</div>
-                            <h3>Leaderboard</h3>
-                            <p>View top players and statistics</p>
+                            <h3>Join Room</h3>
+                            <p>Join existing online game</p>
+                            <div class="feature-list">
+                                <span class="feature" id="join-status">⏳ Checking connection...</span>
+                            </div>
                         </button>
                     </div>
                 </section>
 
-                <!-- Create Game Section -->
-                <section id="create-game" class="section">
-                    <h2>Create Game</h2>
+                <!-- Local Game Setup -->
+                <section class="section" id="local-setup-section">
+                    <h2>Local Game Setup</h2>
                     
-                    <div class="game-setup">
+                    <div class="setup-form">
                         <div class="form-group">
-                            <label class="form-label">Game Mode</label>
-                            <div class="radio-group">
-                                <label class="radio-label">
-                                    <input type="radio" name="gameMode" value="local" checked>
-                                    <span>Local (vs Computer)</span>
-                                </label>
-                                <label class="radio-label">
-                                    <input type="radio" name="gameMode" value="online">
-                                    <span>Online (vs Player)</span>
-                                </label>
-                            </div>
+                            <label class="form-label" for="player-name">Player Name</label>
+                            <input type="text" id="player-name" class="form-control" placeholder="Enter your name" value="Player">
                         </div>
-
+                        
                         <div class="form-group">
-                            <label class="form-label" for="gameCount">Number of Games</label>
-                            <select id="gameCount" class="form-control">
-                                <option value="1">1 Game</option>
+                            <label class="form-label" for="rounds-select">Number of Rounds</label>
+                            <select id="rounds-select" class="form-control">
+                                <option value="1">1 Round</option>
                                 <option value="3" selected>Best of 3</option>
                                 <option value="5">Best of 5</option>
-                                <option value="10">Best of 10</option>
-                                <option value="-1">Unlimited</option>
+                                <option value="7">Best of 7</option>
                             </select>
                         </div>
-
-                        <div class="form-group" id="difficulty-group">
-                            <label class="form-label" for="difficulty">Difficulty</label>
-                            <select id="difficulty" class="form-control">
-                                <option value="easy">Easy - Random choices</option>
-                                <option value="medium" selected>Medium - Pattern learning</option>
-                                <option value="hard">Hard - Advanced AI</option>
-                            </select>
-                        </div>
-
+                        
                         <div class="form-group">
-                            <label class="form-label" for="playerName">Your Name</label>
-                            <input type="text" id="playerName" class="form-control" placeholder="Enter your name" value="Player 1">
+                            <label class="form-label" for="difficulty-select">AI Difficulty</label>
+                            <select id="difficulty-select" class="form-control">
+                                <option value="random">Random - Pure luck</option>
+                                <option value="adaptive" selected>Adaptive - Learns your patterns</option>
+                                <option value="expert">Expert - Advanced strategy</option>
+                            </select>
                         </div>
-
-                        <div id="room-code-display" class="room-code hidden">
-                            <h3>Room Code</h3>
-                            <div class="code-display">
-                                <span id="room-code-text"></span>
-                                <button id="copy-code" class="btn btn--secondary btn--sm">Copy</button>
-                            </div>
-                            <p class="help-text">Share this code with another player to join your game</p>
-                            <div id="room-status" class="status--info status">Waiting for player to join...</div>
+                        
+                        <div class="form-actions">
+                            <button class="btn btn--primary" id="start-local-game">Start Game</button>
+                            <button class="btn btn--outline" id="back-to-menu">Back</button>
                         </div>
-
-                        <button id="start-game" class="btn btn--primary btn--full-width">Start Game</button>
                     </div>
                 </section>
 
-                <!-- Join Game Section -->
-                <section id="join-game" class="section">
-                    <h2>Join Game</h2>
+                <!-- Create Room Section -->
+                <section class="section" id="create-room-section">
+                    <h2>Create Online Room</h2>
                     
-                    <div class="join-form">
+                    <div class="setup-form">
                         <div class="form-group">
-                            <label class="form-label" for="join-player-name">Your Name</label>
-                            <input type="text" id="join-player-name" class="form-control" placeholder="Enter your name" value="Player 2">
+                            <label class="form-label" for="host-name">Your Name</label>
+                            <input type="text" id="host-name" class="form-control" placeholder="Enter your name" value="Host">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label class="form-label" for="room-rounds">Number of Rounds</label>
+                            <select id="room-rounds" class="form-control">
+                                <option value="1">1 Round</option>
+                                <option value="3" selected>Best of 3</option>
+                                <option value="5">Best of 5</option>
+                                <option value="7">Best of 7</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-actions">
+                            <button class="btn btn--primary" id="create-room">
+                                <span class="btn-text">Create Room</span>
+                                <span class="btn-loading hidden">Creating...</span>
+                            </button>
+                            <button class="btn btn--outline" id="back-to-menu-2">Back</button>
+                        </div>
+                    </div>
+
+                    <!-- Room Created Display -->
+                    <div class="room-display hidden" id="room-display">
+                        <div class="room-info">
+                            <h3>🎮 Room Created Successfully!</h3>
+                            <div class="room-code-display">
+                                <div class="room-code" id="room-code">XXXXXX</div>
+                                <button class="btn btn--secondary" id="copy-room-code">Copy Code</button>
+                            </div>
+                            <p class="room-help">Share this code with a friend to join your game</p>
+                        </div>
+                        
+                        <div class="player-status">
+                            <div class="player-slot host">
+                                <span class="player-icon">🎮</span>
+                                <span class="player-name" id="host-display-name">Host</span>
+                                <span class="status-badge ready">Ready</span>
+                            </div>
+                            <div class="player-slot guest" id="guest-slot">
+                                <span class="player-icon">👤</span>
+                                <span class="player-name">Waiting for player...</span>
+                                <span class="status-badge waiting">Waiting</span>
+                            </div>
+                        </div>
+
+                        <div class="room-actions">
+                            <button class="btn btn--outline" id="cancel-room">Cancel Room</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Join Room Section -->
+                <section class="section" id="join-room-section">
+                    <h2>Join Online Room</h2>
+                    
+                    <div class="setup-form">
+                        <div class="form-group">
+                            <label class="form-label" for="guest-name">Your Name</label>
+                            <input type="text" id="guest-name" class="form-control" placeholder="Enter your name" value="Guest">
                         </div>
                         
                         <div class="form-group">
                             <label class="form-label" for="room-code-input">Room Code</label>
-                            <input type="text" id="room-code-input" class="form-control" placeholder="Enter 6-digit room code" maxlength="6">
+                            <input type="text" id="room-code-input" class="form-control" placeholder="Enter 6-character code" maxlength="6" style="text-transform: uppercase;">
                         </div>
                         
-                        <button id="join-game-btn" class="btn btn--primary btn--full-width">Join Game</button>
+                        <div class="status-message hidden" id="join-error"></div>
                         
-                        <div id="join-status" class="status-message hidden"></div>
+                        <div class="form-actions">
+                            <button class="btn btn--primary" id="join-room">
+                                <span class="btn-text">Join Room</span>
+                                <span class="btn-loading hidden">Joining...</span>
+                            </button>
+                            <button class="btn btn--outline" id="back-to-menu-3">Back</button>
+                        </div>
                     </div>
                 </section>
 
-                <!-- Game Interface -->
-                <section id="game-play" class="section">
+                <!-- Game Play Section -->
+                <section class="section" id="game-section">
+                    <!-- Game Header -->
                     <div class="game-header">
-                        <div class="score-board">
-                            <div class="score-item">
-                                <span class="score-label" id="player1-name">You</span>
-                                <span class="score-value" id="player1-score">0</span>
-                            </div>
-                            <div class="score-divider">vs</div>
-                            <div class="score-item">
-                                <span class="score-label" id="player2-name">Computer</span>
-                                <span class="score-value" id="player2-score">0</span>
-                            </div>
+                        <div class="game-info">
+                            <div class="game-mode" id="game-mode-display">Local Game</div>
+                            <div class="round-info" id="round-info">Round 1 of 3</div>
                         </div>
                         
-                        <div class="game-progress">
-                            <span id="game-progress-text">Round 1</span>
+                        <div class="score-display">
+                            <div class="player-score">
+                                <span class="player-name" id="player1-name">Player 1</span>
+                                <span class="score" id="player1-score">0</span>
+                            </div>
+                            <div class="vs-divider">VS</div>
+                            <div class="player-score">
+                                <span class="player-name" id="player2-name">Player 2</span>
+                                <span class="score" id="player2-score">0</span>
+                            </div>
+                        </div>
+
+                        <div class="game-controls">
+                            <button class="btn btn--outline btn--sm" id="quit-game">Quit Game</button>
                         </div>
                     </div>
 
-                    <div class="connection-status" id="connection-status">
-                        <span class="status--info status">Connected</span>
-                    </div>
-
+                    <!-- Game Area -->
                     <div class="game-area">
+                        <!-- Round Status -->
+                        <div class="round-status" id="round-status">
+                            <h3 id="round-message">Make your choice!</h3>
+                            <p id="round-explanation"></p>
+                        </div>
+
+                        <!-- Choices Display -->
                         <div class="choices-display">
-                            <div class="choice-result">
-                                <div class="choice-icon" id="player1-choice">?</div>
-                                <div class="choice-name" id="player1-choice-name">Make your choice</div>
+                            <div class="choice-display">
+                                <div class="choice-icon" id="player1-choice-icon">❓</div>
+                                <div class="choice-name" id="player1-choice-name">Your Choice</div>
                             </div>
-                            
-                            <div class="vs-indicator">VS</div>
-                            
-                            <div class="choice-result">
-                                <div class="choice-icon" id="player2-choice">?</div>
-                                <div class="choice-name" id="player2-choice-name">Waiting...</div>
+                            <div class="vs-center">VS</div>
+                            <div class="choice-display">
+                                <div class="choice-icon" id="player2-choice-icon">❓</div>
+                                <div class="choice-name" id="player2-choice-name">Opponent Choice</div>
                             </div>
                         </div>
 
-                        <div class="result-message">
-                            <h3 id="round-result"></h3>
-                            <p id="result-explanation"></p>
-                        </div>
-
-                        <div class="choice-buttons">
+                        <!-- Choice Buttons -->
+                        <div class="choice-grid" id="choice-grid">
                             <button class="choice-btn" data-choice="rock">
                                 <span class="choice-emoji">🗿</span>
                                 <span class="choice-label">Rock</span>
@@ -197,159 +282,32 @@
                             <button class="choice-btn" data-choice="spock">
                                 <span class="choice-emoji">🖖</span>
                                 <span class="choice-label">Spock</span>
-                            </button>
+            </button>
                         </div>
 
-                        <div class="game-controls">
-                            <button id="next-round" class="btn btn--primary hidden">Next Round</button>
-                            <button id="play-again" class="btn btn--primary hidden">Play Again</button>
-                            <button id="quit-game" class="btn btn--outline">Quit Game</button>
+                        <!-- Waiting State -->
+                        <div class="waiting-state hidden" id="waiting-state">
+                            <div class="spinner"></div>
+                            <p id="waiting-message">Waiting for opponent...</p>
                         </div>
-                    </div>
 
-                    <div id="game-over-modal" class="modal hidden">
-                        <div class="modal-content">
-                            <h2 id="game-over-title">Game Over</h2>
-                            <div id="final-score"></div>
-                            <div class="modal-actions">
-                                <button id="play-again-modal" class="btn btn--primary">Play Again</button>
-                                <button id="main-menu-modal" class="btn btn--outline">Main Menu</button>
-                            </div>
+                        <!-- Round Actions -->
+                        <div class="round-actions hidden" id="round-actions">
+                            <button class="btn btn--primary" id="next-round-btn">Next Round</button>
                         </div>
                     </div>
                 </section>
 
-                <!-- Rules Section -->
-                <section id="rules" class="section">
-                    <h2>Game Rules</h2>
-                    
-                    <div class="rules-content">
-                        <p class="rules-intro">Rock Paper Scissors Lizard Spock is an expansion of the classic Rock Paper Scissors game. Each choice defeats two others and is defeated by two others.</p>
+                <!-- Game Over Section -->
+                <section class="section" id="game-over-section">
+                    <div class="game-over-content">
+                        <h2 id="game-over-title">Game Over</h2>
+                        <div class="final-scores" id="final-scores"></div>
+                        <div class="game-summary" id="game-summary"></div>
                         
-                        <div class="rules-grid">
-                            <div class="rule-card">
-                                <div class="rule-icon">🗿</div>
-                                <h3>Rock</h3>
-                                <p><strong>Crushes</strong> Lizard and <strong>Crushes</strong> Scissors</p>
-                                <small class="rule-detail">Rock wins against Lizard and Scissors</small>
-                            </div>
-                            
-                            <div class="rule-card">
-                                <div class="rule-icon">📄</div>
-                                <h3>Paper</h3>
-                                <p><strong>Covers</strong> Rock and <strong>Disproves</strong> Spock</p>
-                                <small class="rule-detail">Paper wins against Rock and Spock</small>
-                            </div>
-                            
-                            <div class="rule-card">
-                                <div class="rule-icon">✂️</div>
-                                <h3>Scissors</h3>
-                                <p><strong>Cuts</strong> Paper and <strong>Decapitates</strong> Lizard</p>
-                                <small class="rule-detail">Scissors wins against Paper and Lizard</small>
-                            </div>
-                            
-                            <div class="rule-card">
-                                <div class="rule-icon">🦎</div>
-                                <h3>Lizard</h3>
-                                <p><strong>Poisons</strong> Spock and <strong>Eats</strong> Paper</p>
-                                <small class="rule-detail">Lizard wins against Spock and Paper</small>
-                            </div>
-                            
-                            <div class="rule-card">
-                                <div class="rule-icon">🖖</div>
-                                <h3>Spock</h3>
-                                <p><strong>Smashes</strong> Scissors and <strong>Vaporizes</strong> Rock</p>
-                                <small class="rule-detail">Spock wins against Scissors and Rock</small>
-                            </div>
-                        </div>
-
-                        <div class="rules-summary">
-                            <h3>Quick Reference</h3>
-                            <ul class="rules-list">
-                                <li>🗿 Rock crushes ✂️ Scissors and 🦎 Lizard</li>
-                                <li>📄 Paper covers 🗿 Rock and disproves 🖖 Spock</li>
-                                <li>✂️ Scissors cuts 📄 Paper and decapitates 🦎 Lizard</li>
-                                <li>🦎 Lizard poisons 🖖 Spock and eats 📄 Paper</li>
-                                <li>🖖 Spock smashes ✂️ Scissors and vaporizes 🗿 Rock</li>
-                            </ul>
-                        </div>
-                    </div>
-                </section>
-
-                <!-- Feedback Section -->
-                <section id="feedback" class="section">
-                    <h2>Feedback</h2>
-                    
-                    <div class="feedback-container">
-                        <form id="feedback-form" class="feedback-form">
-                            <div class="form-group">
-                                <label class="form-label" for="feedback-name">Name (Optional)</label>
-                                <input type="text" id="feedback-name" class="form-control" placeholder="Your name">
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label" for="feedback-email">Email (Optional)</label>
-                                <input type="email" id="feedback-email" class="form-control" placeholder="your.email@example.com">
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label">Rating</label>
-                                <div class="star-rating">
-                                    <button type="button" class="star active" data-rating="1">⭐</button>
-                                    <button type="button" class="star active" data-rating="2">⭐</button>
-                                    <button type="button" class="star active" data-rating="3">⭐</button>
-                                    <button type="button" class="star active" data-rating="4">⭐</button>
-                                    <button type="button" class="star active" data-rating="5">⭐</button>
-                                </div>
-                                <span class="rating-text">Click to rate (5 stars - Excellent)</span>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label" for="feedback-message">Feedback (Required)</label>
-                                <textarea id="feedback-message" class="form-control" rows="5" placeholder="Share your thoughts about the game..." required></textarea>
-                            </div>
-                            
-                            <div class="form-group">
-                                <button type="submit" class="btn btn--primary btn--full-width">Submit Feedback</button>
-                            </div>
-                        </form>
-                        
-                        <div id="feedback-success" class="success-message hidden">
-                            <h3>Thank You! ✨</h3>
-                            <p>Your feedback has been submitted successfully. We appreciate your input and will use it to improve the game!</p>
-                            <button class="btn btn--outline" data-section="main-menu">Return to Main Menu</button>
-                        </div>
-                    </div>
-                </section>
-
-                <!-- Leaderboard Section -->
-                <section id="leaderboard" class="section">
-                    <h2>Leaderboard</h2>
-                    
-                    <div class="leaderboard-controls">
-                        <div class="form-group">
-                            <label class="form-label" for="sort-by">Sort by</label>
-                            <select id="sort-by" class="form-control">
-                                <option value="winPercentage">Win Percentage</option>
-                                <option value="totalWins">Total Wins</option>
-                                <option value="totalGames">Games Played</option>
-                                <option value="winStreak">Current Win Streak</option>
-                            </select>
-                        </div>
-                    </div>
-                    
-                    <div class="leaderboard-table">
-                        <div class="table-header">
-                            <div class="table-cell">Rank</div>
-                            <div class="table-cell">Player</div>
-                            <div class="table-cell">Win %</div>
-                            <div class="table-cell">W/L/T</div>
-                            <div class="table-cell">Streak</div>
-                        </div>
-                        <div id="leaderboard-body" class="table-body">
-                            <div class="empty-state">
-                                <p>Loading leaderboard...</p>
-                            </div>
+                        <div class="game-over-actions">
+                            <button class="btn btn--primary" id="play-again-btn">Play Again</button>
+                            <button class="btn btn--outline" id="return-to-menu">Return to Menu</button>
                         </div>
                     </div>
                 </section>
@@ -357,9 +315,6 @@
         </main>
     </div>
 
-    <!-- Firebase SDK -->
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
