@@ -51,7 +51,7 @@
             <div class="container">
                 <!-- Firebase Configuration Notice -->
                 <div class="config-notice hidden" id="firebase-notice">
-                    <h3>⚠️ Firebase Configuration Required</h3>
+                    <h2>⚠️ Firebase Configuration Required</h2>
                     <p>To use online multiplayer features, you need to configure Firebase. The app is currently running in local mode only.</p>
                     <button class="btn btn--outline" id="local-mode-btn">Continue in Local Mode</button>
                 </div>
@@ -61,7 +61,7 @@
                     <h2>Game Mode</h2>
                     
                     <div class="menu-grid">
-                        <button class="menu-card" id="local-game-btn">
+                        <div class="menu-card" id="local-game-btn">
                             <div class="menu-card__icon">🤖</div>
                             <h3>Local Game</h3>
                             <p>Play against AI opponent</p>
@@ -70,25 +70,25 @@
                                 <span class="feature">✓ Multiple difficulties</span>
                                 <span class="feature">✓ No network required</span>
                             </div>
-                        </button>
+                        </div>
                         
-                        <button class="menu-card" id="create-room-btn">
+                        <div class="menu-card" id="create-room-btn">
                             <div class="menu-card__icon">🎮</div>
                             <h3>Create Room</h3>
                             <p>Start online multiplayer game</p>
                             <div class="feature-list">
                                 <span class="feature" id="create-status">⏳ Checking connection...</span>
                             </div>
-                        </button>
+                        </div>
                         
-                        <button class="menu-card" id="join-room-btn">
+                        <div class="menu-card" id="join-room-btn">
                             <div class="menu-card__icon">🌐</div>
                             <h3>Join Room</h3>
                             <p>Join existing online game</p>
                             <div class="feature-list">
                                 <span class="feature" id="join-status">⏳ Checking connection...</span>
                             </div>
-                        </button>
+                        </div>
                     </div>
                 </section>
 
